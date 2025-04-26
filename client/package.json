@@ -14,5 +14,8 @@
   },
   "proxy": {
     "/api": "http://localhost:5000"
+  },
+  "devDependencies": {
+    "vite": "^6.3.3"
   }
 }
