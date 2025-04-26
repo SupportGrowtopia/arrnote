@@ -16,6 +16,7 @@
     "/api": "http://localhost:5000"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
     "vite": "^6.3.3"
   }
 }
