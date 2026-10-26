@@ -1,6 +1,6 @@
 --[[
 =====================================================================
-  ViolenceDistrict_Fluent.lua (v3.3 - Fluent UI + Ultra Low Mode)
+  ViolenceDistrict_Fluent.lua (v3.4 - Flat 1-Color Low Mode Fix)
   Executor : Xeno / Compatible Luau Executors
   Minimize : RightShift
 =====================================================================
@@ -72,7 +72,7 @@ local S = {
         bright = 2,
         noDark = true,
         lowMode = false,
-        extremeHide = false,
+        colorScheme = "Original", -- Original, SlateGrey, DarkGrey, LightGrey
         disableBones = true
     },
     aim  = { on = false, fov = 250, dist = 150, smooth = 0.5, part = "HumanoidRootPart", wall = true },
@@ -97,6 +97,12 @@ local CROSS_COLS = {
     Red    = Color3.fromRGB(255, 50, 50),
     Yellow = Color3.fromRGB(255, 230, 50),
     White  = Color3.fromRGB(255, 255, 255),
+}
+
+local FLAT_PALETTE = {
+    SlateGrey = Color3.fromRGB(115, 120, 130),
+    DarkGrey  = Color3.fromRGB(65, 68, 75),
+    LightGrey = Color3.fromRGB(175, 180, 188),
 }
 
 ------------------------------------------------------------------
@@ -525,26 +531,18 @@ local function countObjs(kind)
 end
 
 ------------------------------------------------------------------
--- ULTRA LOW MODE (POTATO GRAPHICS / ANTI-LAG)
+-- LOW MODE (FLAT 1-WARNA / HAPUS TEKSTUR TANPA HILANGKAN BANGUNAN)
 ------------------------------------------------------------------
-local IMPORTANT_TAGS = {
-    "Generator", "GeneratorPoint", "pallet", "PalletPoint",
-    "pumpkin", "Spike", "HookPoint", "Killer", "Survivor",
-    "EscapePart", "Exit", "VaultPoint", "vaultbox", "window", "Item"
-}
+local origPartColors = setmetatable({}, { __mode = "k" })
 
-local function isGameplayProtected(inst)
+local function isCharacterOrImportant(inst)
     if inst == workspace.Terrain then return true end
     local p = inst
     while p and p ~= workspace do
         for _, plr in ipairs(Players:GetPlayers()) do
             if plr.Character == p then return true end
         end
-        for _, tag in ipairs(IMPORTANT_TAGS) do
-            if CollectionService:HasTag(p, tag) then return true end
-        end
-        local n = p.Name:lower()
-        if n == "generators" or n == "pallets" or n == "pumpkins" or n == "hooks" or n == "gate" or n == "fininshline" then
+        if CollectionService:HasTag(p, "Killer") or CollectionService:HasTag(p, "Survivor") or CollectionService:HasTag(p, "Item") then
             return true
         end
         p = p.Parent
@@ -552,73 +550,85 @@ local function isGameplayProtected(inst)
     return false
 end
 
-local function isDecorativeClutter(inst)
+local function isWeatherEffect(inst)
     local p = inst
     while p and p ~= workspace do
-        if CollectionService:HasTag(p, "_BrushtoolBrushed") then return true end
         local n = p.Name:lower()
-        if n == "rain" or n == "nature" or n == "powerlines" or n == "foggy wind" or n == "vfx" then
+        if n == "rain" or n == "foggy wind" then
             return true
         end
         p = p.Parent
     end
     return false
+end
+
+local function applyPartColorScheme(part)
+    if not origPartColors[part] then
+        origPartColors[part] = part.Color
+    end
+    local targetCol = FLAT_PALETTE[S.vis.colorScheme]
+    if targetCol then
+        part.Color = targetCol
+    else
+        part.Color = origPartColors[part]
+    end
 end
 
 local function optimizeInstance(inst)
     if not S.vis.lowMode then return end
     if inst:IsDescendantOf(espFolder) then return end
+    if isCharacterOrImportant(inst) then return end
 
-    -- Hapus tekstur PBR & gambar permukaan yang memakan VRAM/GPU
+    -- 1. Hapus semua tekstur ditempel (SurfaceAppearance PBR, Decal, Texture) agar jadi 1 warna polos
     if inst:IsA("SurfaceAppearance") or inst:IsA("Decal") or inst:IsA("Texture") then
-        local protected = isGameplayProtected(inst)
-        if not protected then
-            pcall(function() inst:Destroy() end)
-        end
+        pcall(function() inst:Destroy() end)
         return
     end
 
-    -- Matikan partikel cuaca, asap, api, dan sorotan lampu lokal
+    -- 2. Hapus TextureId pada SpecialMesh jika ada
+    if inst:IsA("SpecialMesh") then
+        pcall(function() inst.TextureId = "" end)
+        return
+    end
+
+    -- 3. Matikan partikel cuaca/efek berlebih (bukan bangunan)
     if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles") then
-        if not isGameplayProtected(inst) then
-            pcall(function() inst.Enabled = false end)
-        end
+        pcall(function() inst.Enabled = false end)
         return
     end
 
-    if inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then
-        if not isGameplayProtected(inst) then
-            pcall(function() inst.Enabled = false end)
-        end
-        return
-    end
-
-    -- Sederhanakan BasePart & MeshPart pada bangunan/peta
+    -- 4. Ubah blok/bangunan menjadi SmoothPlastic polos 1 warna (TANPA mengubah Transparency bangunan!)
     if inst:IsA("BasePart") then
-        local protected = isGameplayProtected(inst)
+        if isWeatherEffect(inst) then
+            -- Hanya part partikel hujan/kabut cuaca yang disembunyikan
+            pcall(function() inst.Transparency = 1 end)
+            return
+        end
+
         pcall(function()
             inst.Material = Enum.Material.SmoothPlastic
+            inst.MaterialVariant = ""
             inst.Reflectance = 0
             inst.CastShadow = false
-            if inst:IsA("MeshPart") and not protected then
+            if inst:IsA("MeshPart") then
                 inst.TextureID = ""
             end
+            applyPartColorScheme(inst)
         end)
-
-        if not protected then
-            if isDecorativeClutter(inst) then
-                pcall(function()
-                    inst.Transparency = 1
-                    inst.CanCollide = false
-                end)
-            elseif S.vis.extremeHide and not inst.CanCollide and inst.Transparency < 1 then
-                -- Sembunyikan detail bangunan non-collidable (ornamen/pipa/rumput/dekorasi)
-                pcall(function()
-                    inst.Transparency = 1
-                end)
-            end
-        end
     end
+end
+
+local function refreshColorSchemeOnly()
+    if not S.vis.lowMode then return end
+    task.spawn(function()
+        local ds = workspace:GetDescendants()
+        for i, d in ipairs(ds) do
+            if d:IsA("BasePart") and not isCharacterOrImportant(d) and not isWeatherEffect(d) then
+                pcall(applyPartColorScheme, d)
+            end
+            if i % 1000 == 0 then task.wait() end
+        end
+    end)
 end
 
 local function toggleSmartBoneWorkers(disable)
@@ -648,11 +658,9 @@ local function applyLowModeBatch()
     pcall(function()
         settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
         Lighting.GlobalShadows = false
-        Lighting.Technology = Enum.Technology.Compatibility
         workspace.Terrain.WaterWaveSize = 0
         workspace.Terrain.WaterWaveSpeed = 0
         workspace.Terrain.WaterReflectance = 0
-        workspace.Terrain.WaterTransparency = 0
     end)
 
     if S.vis.disableBones then
@@ -1007,7 +1015,7 @@ end)
 ------------------------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Violence District",
-    SubTitle = "Fluent Edition v3.3",
+    SubTitle = "Fluent Edition v3.4",
     TabWidth = 150,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -1222,11 +1230,11 @@ AimSec:AddSlider("AIM_Smooth", {
 })
 
 -- ================= TAB 5: VISUAL & LOW MODE =================
-local LowSec = Tabs.Visual:AddSection("Ultra Low Mode (Anti-Lag / Potato)")
+local LowSec = Tabs.Visual:AddSection("Low Mode (Bangunan Utuh + Polos 1 Warna)")
 
 local T_LowMode = LowSec:AddToggle("VIS_LowMode", {
-    Title = "Aktifkan Ultra Low Mode",
-    Description = "Hapus tekstur bangunan (SurfaceAppearance/Mesh), hujan, partikel & bayangan",
+    Title = "Aktifkan Low Mode (Hapus Tekstur Blok)",
+    Description = "Bangunan tetap utuh, semua tekstur diubah jadi blok polos SmoothPlastic 1 warna",
     Default = false
 })
 T_LowMode:OnChanged(function()
@@ -1234,28 +1242,30 @@ T_LowMode:OnChanged(function()
     if S.vis.lowMode then
         applyLowModeBatch()
         Fluent:Notify({
-            Title = "Ultra Low Mode",
-            Content = "Membersihkan detail bangunan, tekstur & partikel...",
+            Title = "Low Mode Aktif",
+            Content = "Tekstur bangunan dihapus menjadi blok 1 warna polos (bangunan tetap utuh).",
             Duration = 3
         })
     end
 end)
 
-local T_ExtremeHide = LowSec:AddToggle("VIS_ExtremeHide", {
-    Title = "Sembunyikan Detail Bangunan Non-Collide",
-    Description = "Sembunyikan ornamen/dekorasi tembus pandang (CanCollide = false) agar makin ringan",
-    Default = false
+local D_ColScheme = LowSec:AddDropdown("VIS_ColorScheme", {
+    Title = "Mode Warna Blok Bangunan",
+    Description = "Original = warna dasar tiap blok, lainnya = ratakan semua blok jadi 1 warna",
+    Values = { "Original", "SlateGrey", "DarkGrey", "LightGrey" },
+    Multi = false,
+    Default = 1,
 })
-T_ExtremeHide:OnChanged(function()
-    S.vis.extremeHide = Options.VIS_ExtremeHide.Value
-    if S.vis.lowMode and S.vis.extremeHide then
-        applyLowModeBatch()
+D_ColScheme:OnChanged(function(v)
+    S.vis.colorScheme = v
+    if S.vis.lowMode then
+        refreshColorSchemeOnly()
     end
 end)
 
 local T_DisBones = LowSec:AddToggle("VIS_DisableBones", {
     Title = "Matikan Fisika SmartBone (Hemat CPU)",
-    Description = "Mematikan kalkulasi goyangan aksesoris/kain (SmartBone-Actors)",
+    Description = "Mematikan kalkulasi goyangan kain/aksesoris (SmartBone-Actors)",
     Default = true
 })
 T_DisBones:OnChanged(function()
@@ -1266,13 +1276,13 @@ T_DisBones:OnChanged(function()
 end)
 
 LowSec:AddButton({
-    Title = "Paksa Bersihkan Ulang Map Sekarang",
-    Description = "Gunakan saat baru masuk ronde / map baru",
+    Title = "Terapkan Ulang Low Mode (Refresh Map)",
+    Description = "Klik saat baru pindah map / ronde baru",
     Callback = function()
         S.vis.lowMode = true
         if Options.VIS_LowMode then Options.VIS_LowMode:SetValue(true) end
         applyLowModeBatch()
-        Fluent:Notify({ Title = "Low Mode", Content = "Map berhasil dibersihkan ulang!", Duration = 2 })
+        Fluent:Notify({ Title = "Low Mode", Content = "Seluruh blok bangunan disederhanakan!", Duration = 2 })
     end
 })
 
@@ -1370,6 +1380,6 @@ SaveManager:LoadAutoloadConfig()
 
 Fluent:Notify({
     Title = "Violence District",
-    Content = "Fluent Hub v3.3 siap! Cek tab Visual untuk Ultra Low Mode.",
+    Content = "Fluent Hub v3.4 siap! Low Mode kini menjaga bangunan tetap utuh.",
     Duration = 4
 })
