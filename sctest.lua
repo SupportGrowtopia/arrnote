@@ -1,6 +1,6 @@
 --[[
 =====================================================================
-  ViolenceDistrict_Fluent.lua (v3.2 - Fluent UI Edition)
+  ViolenceDistrict_Fluent.lua (v3.3 - Fluent UI + Ultra Low Mode)
   Executor : Xeno / Compatible Luau Executors
   Minimize : RightShift
 =====================================================================
@@ -67,7 +67,14 @@ local S = {
         color = "Green"
     },
     move = { on = false, mode = "WalkSpeed", ws = 24, cf = 10 },
-    vis  = { full = false, bright = 2, noDark = true },
+    vis  = {
+        full = false,
+        bright = 2,
+        noDark = true,
+        lowMode = false,
+        extremeHide = false,
+        disableBones = true
+    },
     aim  = { on = false, fov = 250, dist = 150, smooth = 0.5, part = "HumanoidRootPart", wall = true },
 }
 
@@ -518,6 +525,160 @@ local function countObjs(kind)
 end
 
 ------------------------------------------------------------------
+-- ULTRA LOW MODE (POTATO GRAPHICS / ANTI-LAG)
+------------------------------------------------------------------
+local IMPORTANT_TAGS = {
+    "Generator", "GeneratorPoint", "pallet", "PalletPoint",
+    "pumpkin", "Spike", "HookPoint", "Killer", "Survivor",
+    "EscapePart", "Exit", "VaultPoint", "vaultbox", "window", "Item"
+}
+
+local function isGameplayProtected(inst)
+    if inst == workspace.Terrain then return true end
+    local p = inst
+    while p and p ~= workspace do
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr.Character == p then return true end
+        end
+        for _, tag in ipairs(IMPORTANT_TAGS) do
+            if CollectionService:HasTag(p, tag) then return true end
+        end
+        local n = p.Name:lower()
+        if n == "generators" or n == "pallets" or n == "pumpkins" or n == "hooks" or n == "gate" or n == "fininshline" then
+            return true
+        end
+        p = p.Parent
+    end
+    return false
+end
+
+local function isDecorativeClutter(inst)
+    local p = inst
+    while p and p ~= workspace do
+        if CollectionService:HasTag(p, "_BrushtoolBrushed") then return true end
+        local n = p.Name:lower()
+        if n == "rain" or n == "nature" or n == "powerlines" or n == "foggy wind" or n == "vfx" then
+            return true
+        end
+        p = p.Parent
+    end
+    return false
+end
+
+local function optimizeInstance(inst)
+    if not S.vis.lowMode then return end
+    if inst:IsDescendantOf(espFolder) then return end
+
+    -- Hapus tekstur PBR & gambar permukaan yang memakan VRAM/GPU
+    if inst:IsA("SurfaceAppearance") or inst:IsA("Decal") or inst:IsA("Texture") then
+        local protected = isGameplayProtected(inst)
+        if not protected then
+            pcall(function() inst:Destroy() end)
+        end
+        return
+    end
+
+    -- Matikan partikel cuaca, asap, api, dan sorotan lampu lokal
+    if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles") then
+        if not isGameplayProtected(inst) then
+            pcall(function() inst.Enabled = false end)
+        end
+        return
+    end
+
+    if inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then
+        if not isGameplayProtected(inst) then
+            pcall(function() inst.Enabled = false end)
+        end
+        return
+    end
+
+    -- Sederhanakan BasePart & MeshPart pada bangunan/peta
+    if inst:IsA("BasePart") then
+        local protected = isGameplayProtected(inst)
+        pcall(function()
+            inst.Material = Enum.Material.SmoothPlastic
+            inst.Reflectance = 0
+            inst.CastShadow = false
+            if inst:IsA("MeshPart") and not protected then
+                inst.TextureID = ""
+            end
+        end)
+
+        if not protected then
+            if isDecorativeClutter(inst) then
+                pcall(function()
+                    inst.Transparency = 1
+                    inst.CanCollide = false
+                end)
+            elseif S.vis.extremeHide and not inst.CanCollide and inst.Transparency < 1 then
+                -- Sembunyikan detail bangunan non-collidable (ornamen/pipa/rumput/dekorasi)
+                pcall(function()
+                    inst.Transparency = 1
+                end)
+            end
+        end
+    end
+end
+
+local function toggleSmartBoneWorkers(disable)
+    local ps = LP:FindFirstChild("PlayerScripts")
+    if not ps then return end
+    local sb = ps:FindFirstChild("SmartBone-Actors")
+    if sb then
+        for _, d in ipairs(sb:GetDescendants()) do
+            if d:IsA("LocalScript") then
+                pcall(function() d.Disabled = disable end)
+            end
+        end
+    end
+    local mech = ps:FindFirstChild("Mechanics")
+    local eff = mech and mech:FindFirstChild("effects")
+    local bp = eff and eff:FindFirstChild("bonephysics")
+    if bp and bp:IsA("LocalScript") then
+        pcall(function() bp.Disabled = disable end)
+    end
+end
+
+local lowModeRunning = false
+local function applyLowModeBatch()
+    if not S.vis.lowMode or lowModeRunning then return end
+    lowModeRunning = true
+
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        Lighting.GlobalShadows = false
+        Lighting.Technology = Enum.Technology.Compatibility
+        workspace.Terrain.WaterWaveSize = 0
+        workspace.Terrain.WaterWaveSpeed = 0
+        workspace.Terrain.WaterReflectance = 0
+        workspace.Terrain.WaterTransparency = 0
+    end)
+
+    if S.vis.disableBones then
+        pcall(toggleSmartBoneWorkers, true)
+    end
+
+    task.spawn(function()
+        local ds = workspace:GetDescendants()
+        for i, d in ipairs(ds) do
+            if not S.vis.lowMode then break end
+            pcall(optimizeInstance, d)
+            if i % 600 == 0 then task.wait() end
+        end
+        lowModeRunning = false
+    end)
+end
+
+track(workspace.DescendantAdded:Connect(function(d)
+    if S.vis.lowMode then
+        task.defer(function()
+            pcall(optimizeInstance, d)
+        end)
+    end
+end))
+
+------------------------------------------------------------------
 -- AUTO SKILL CHECK
 ------------------------------------------------------------------
 local GUI_NAMES  = { "SkillCheckPromptGui", "SkillCheckPromptGui-con" }
@@ -846,7 +1007,7 @@ end)
 ------------------------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Violence District",
-    SubTitle = "Fluent Edition v3.2",
+    SubTitle = "Fluent Edition v3.3",
     TabWidth = 150,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -1060,7 +1221,61 @@ AimSec:AddSlider("AIM_Smooth", {
     Callback = function(v) S.aim.smooth = v end
 })
 
--- ================= TAB 5: VISUAL =================
+-- ================= TAB 5: VISUAL & LOW MODE =================
+local LowSec = Tabs.Visual:AddSection("Ultra Low Mode (Anti-Lag / Potato)")
+
+local T_LowMode = LowSec:AddToggle("VIS_LowMode", {
+    Title = "Aktifkan Ultra Low Mode",
+    Description = "Hapus tekstur bangunan (SurfaceAppearance/Mesh), hujan, partikel & bayangan",
+    Default = false
+})
+T_LowMode:OnChanged(function()
+    S.vis.lowMode = Options.VIS_LowMode.Value
+    if S.vis.lowMode then
+        applyLowModeBatch()
+        Fluent:Notify({
+            Title = "Ultra Low Mode",
+            Content = "Membersihkan detail bangunan, tekstur & partikel...",
+            Duration = 3
+        })
+    end
+end)
+
+local T_ExtremeHide = LowSec:AddToggle("VIS_ExtremeHide", {
+    Title = "Sembunyikan Detail Bangunan Non-Collide",
+    Description = "Sembunyikan ornamen/dekorasi tembus pandang (CanCollide = false) agar makin ringan",
+    Default = false
+})
+T_ExtremeHide:OnChanged(function()
+    S.vis.extremeHide = Options.VIS_ExtremeHide.Value
+    if S.vis.lowMode and S.vis.extremeHide then
+        applyLowModeBatch()
+    end
+end)
+
+local T_DisBones = LowSec:AddToggle("VIS_DisableBones", {
+    Title = "Matikan Fisika SmartBone (Hemat CPU)",
+    Description = "Mematikan kalkulasi goyangan aksesoris/kain (SmartBone-Actors)",
+    Default = true
+})
+T_DisBones:OnChanged(function()
+    S.vis.disableBones = Options.VIS_DisableBones.Value
+    if S.vis.lowMode then
+        pcall(toggleSmartBoneWorkers, S.vis.disableBones)
+    end
+end)
+
+LowSec:AddButton({
+    Title = "Paksa Bersihkan Ulang Map Sekarang",
+    Description = "Gunakan saat baru masuk ronde / map baru",
+    Callback = function()
+        S.vis.lowMode = true
+        if Options.VIS_LowMode then Options.VIS_LowMode:SetValue(true) end
+        applyLowModeBatch()
+        Fluent:Notify({ Title = "Low Mode", Content = "Map berhasil dibersihkan ulang!", Duration = 2 })
+    end
+})
+
 local VisSec = Tabs.Visual:AddSection("Pencahayaan & Efek")
 
 local T_VisFull = VisSec:AddToggle("VIS_Full", { Title = "Fullbright (Terang & Hapus Kabut)", Default = false })
@@ -1099,10 +1314,12 @@ local hub = {}
 local function destroyHub()
     alive = false
     S.vis.full = false
+    S.vis.lowMode = false
     S.move.on = false
     S.aim.on = false
     SKC.on = false
     pcall(lightRestore)
+    pcall(toggleSmartBoneWorkers, false)
     pcall(function() RunService:UnbindFromRenderStep("MAG_VD_Aim") end)
     pcall(clearPlayersESP)
     pcall(clearObjESP)
@@ -1153,6 +1370,6 @@ SaveManager:LoadAutoloadConfig()
 
 Fluent:Notify({
     Title = "Violence District",
-    Content = "Fluent Hub v3.2 berhasil dimuat! (RightShift untuk minimize)",
+    Content = "Fluent Hub v3.3 siap! Cek tab Visual untuk Ultra Low Mode.",
     Duration = 4
 })
