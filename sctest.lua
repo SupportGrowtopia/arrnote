@@ -1,8 +1,12 @@
 --[[
 =====================================================================
-  ViolenceDistrict_Fluent.lua (v3.4 - Flat 1-Color Low Mode Fix)
-  Executor : Xeno / Compatible Luau Executors
-  Minimize : RightShift
+  ViolenceDistrict_Fluent.lua (v3.5 - Anti-Lag & Optimized Edition)
+  Perbaikan Performa:
+  - Zero-Allocation RenderStepped (Skill Check & Fullbright di-cache)
+  - Pembatasan Highlight otomatis (mencegah limit 31 Highlight Roblox)
+  - Event Throttling untuk StreamingEnabled & ClientChainVisual
+  - Auto Skill Check murni (Fitur Auto-Learn dihapus)
+  - Low Mode instan tanpa bikin stutter/freeze
 =====================================================================
 ]]
 
@@ -56,7 +60,7 @@ local S = {
         hideDone = true,
         fill = true,
         maxDist = 0,
-        palletDist = 150
+        palletDist = 120 -- Dibatasi default 120m agar tidak tembus limit 31 Highlight Roblox
     },
     cross = {
         on = true,
@@ -72,17 +76,16 @@ local S = {
         bright = 2,
         noDark = true,
         lowMode = false,
-        colorScheme = "Original", -- Original, SlateGrey, DarkGrey, LightGrey
+        colorScheme = "Original",
         disableBones = true
     },
     aim  = { on = false, fov = 250, dist = 150, smooth = 0.5, part = "HumanoidRootPart", wall = true },
 }
 
-local SKC = { on = true, input = "Space", offset = 115, lead = 0.03, learn = true }
+-- Auto Skill Check (Tanpa Auto-Learn)
+local SKC = { on = true, input = "Space", offset = 115, lead = 0.03 }
 local INPUT_LIST = { "Space", "Mouse", "E", "F" }
 
--- Warna ESP:
--- 1. Killer (Merah) | 2. Survivor (Hijau) | 3. Pallet (Ungu) | 4. Generator (Kuning) | 5. Labu (Cyan)
 local COL = {
     killer   = Color3.fromRGB(255, 45, 45),
     survivor = Color3.fromRGB(50, 255, 90),
@@ -108,33 +111,18 @@ local FLAT_PALETTE = {
 ------------------------------------------------------------------
 -- HELPERS
 ------------------------------------------------------------------
-local function hasKeyword(s, list)
-    s = string.lower(tostring(s))
-    for _, k in ipairs(list) do
-        if s:find(k, 1, true) then return true end
-    end
-    return false
-end
-
-local function inList(v, list)
-    for _, x in ipairs(list) do
-        if x == v then return true end
-    end
-    return false
-end
-
 local function getRoot()
     local c = LP.Character
     return c and c:FindFirstChild("HumanoidRootPart"), c
 end
 
 local function posOf(inst)
-    local ok, p = pcall(function()
-        if inst:IsA("BasePart") then return inst.Position end
-        if inst:IsA("Model") then return inst:GetPivot().Position end
-        return nil
-    end)
-    if ok then return p end
+    if not inst then return nil end
+    if inst:IsA("BasePart") then return inst.Position end
+    if inst:IsA("Model") then
+        local ok, cf = pcall(inst.GetPivot, inst)
+        if ok and cf then return cf.Position end
+    end
     return nil
 end
 
@@ -249,7 +237,7 @@ end
 updateCrosshair()
 
 ------------------------------------------------------------------
--- ESP SYSTEM
+-- ESP SYSTEM (OPTIMIZED VIA COLLECTION SERVICE TAGS)
 ------------------------------------------------------------------
 local espFolder = Instance.new("Folder")
 espFolder.Name = "MAG_VD_ESP"
@@ -310,6 +298,8 @@ local function updatePlayersESP()
     end
     local root = getRoot()
     local seen = {}
+    local targetFill = S.esp.fill and 0.65 or 1
+
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LP then
             local role = roleOf(plr)
@@ -324,22 +314,33 @@ local function updatePlayersESP()
                     local e = pEsp[plr]
                     if not e or e.char ~= char or not e.bb.Parent or not e.hl.Parent then
                         destroyEntry(e)
-                        e = { char = char }
+                        e = { char = char, col = col, fill = targetFill, txt = "" }
                         e.hl = makeHighlight(char, col)
                         e.bb, e.lbl = makeLabel(hrp, col, 11, 3.2)
                         pEsp[plr] = e
                     end
-                    e.hl.FillColor = col
-                    e.hl.OutlineColor = col
-                    e.hl.FillTransparency = S.esp.fill and 0.65 or 1
-                    e.lbl.TextColor3 = col
+                    -- Hanya update property jika berubah (mencegah GPU redraw)
+                    if e.col ~= col then
+                        e.col = col
+                        e.hl.FillColor = col
+                        e.hl.OutlineColor = col
+                        e.lbl.TextColor3 = col
+                    end
+                    if e.fill ~= targetFill then
+                        e.fill = targetFill
+                        e.hl.FillTransparency = targetFill
+                    end
 
                     local tags = ""
                     if char:GetAttribute("Knocked") == true then tags = tags .. " [DOWN]" end
                     local hc = tonumber(char:GetAttribute("HookCount")) or 0
                     if hc > 0 then tags = tags .. " [H" .. string.format("%.0f", hc) .. "]" end
                     local prefix = (role == "Killer") and "[KILLER] " or ""
-                    e.lbl.Text = string.format("%s%s (%.0fm)%s", prefix, plr.Name:sub(1, 14), dist, tags)
+                    local newTxt = string.format("%s%s (%.0fm)%s", prefix, plr.Name:sub(1, 14), dist, tags)
+                    if e.txt ~= newTxt then
+                        e.txt = newTxt
+                        e.lbl.Text = newTxt
+                    end
                 end
             end
         end
@@ -352,103 +353,48 @@ local function updatePlayersESP()
     end
 end
 
--- 3, 4 & 5: Pallet, Generator & Labu ESP
+-- 3, 4 & 5: Pallet, Generator & Labu ESP (Menggunakan Tag Langsung Tanpa Scan Seluruh Workspace)
 local OBJ = { gen = {}, pallet = {}, pumpkin = {} }
 local objEsp = {}
-local scanDone = false
 
-local function classify(inst)
-    if not (inst:IsA("Model") or inst:IsA("BasePart")) then return nil end
+local TAG_MAP = {
+    Generator = "gen",
+    pallet    = "pallet",
+    pumpkin   = "pumpkin"
+}
 
-    if CollectionService:HasTag(inst, "Generator") then return "gen" end
-    if inst:IsA("Model") and inst.Name == "Generator" and inst.Parent and inst.Parent.Name == "Generators" then
-        return "gen"
-    end
-
-    if CollectionService:HasTag(inst, "pallet") then return "pallet" end
-    if inst.Parent and inst.Parent.Name:lower() == "pallets" then return "pallet" end
-
-    if CollectionService:HasTag(inst, "pumpkin") then return "pumpkin" end
-    if inst.Parent and inst.Parent.Name:lower() == "pumpkins" then return "pumpkin" end
-
-    return nil
-end
-
-local function ancestorRegistered(inst)
-    local p = inst.Parent
-    while p and p ~= workspace do
-        if OBJ.gen[p] or OBJ.pallet[p] or OBJ.pumpkin[p] then return true end
-        p = p.Parent
-    end
-    return false
-end
-
-local function considerObj(inst)
-    local kind = classify(inst)
-    if not kind then return end
-    if ancestorRegistered(inst) then return end
-    OBJ[kind][inst] = true
-    for _, d in ipairs(inst:GetDescendants()) do
-        OBJ.gen[d] = nil
-        OBJ.pallet[d] = nil
-        OBJ.pumpkin[d] = nil
-    end
-end
-
-task.spawn(function()
-    for _, tag in ipairs({ "Generator", "pallet", "pumpkin" }) do
-        local ok, list = pcall(function() return CollectionService:GetTagged(tag) end)
-        if ok and list then
-            for _, inst in ipairs(list) do
-                pcall(considerObj, inst)
-            end
-        end
-    end
-    local ds = workspace:GetDescendants()
-    for i, d in ipairs(ds) do
-        pcall(considerObj, d)
-        if i % 1500 == 0 then task.wait() end
-    end
-    scanDone = true
-end)
-
-track(workspace.DescendantAdded:Connect(function(d)
-    pcall(considerObj, d)
-end))
-track(workspace.DescendantRemoving:Connect(function(d)
-    OBJ.gen[d] = nil
-    OBJ.pallet[d] = nil
-    OBJ.pumpkin[d] = nil
-end))
-
-local PROG_WORDS = { "progress", "percent", "repair", "charge", "complet", "fill" }
-
-local function readProgress(inst)
-    local v = tonumber(inst:GetAttribute("RepairProgress"))
-    if v then return v end
-    for k, val in pairs(inst:GetAttributes()) do
-        if type(val) == "number" and hasKeyword(k, PROG_WORDS) then return val end
-    end
-    return nil
-end
-
-local function adorneeOf(inst, kind)
+local function registerTagged(kind, inst)
+    if not inst or not (inst:IsA("Model") or inst:IsA("BasePart")) then return end
+    local ad, hlTarget = inst, inst
     if kind == "pallet" and inst:IsA("Model") then
         local intact = inst:FindFirstChild("Intact")
         if intact then
-            return intact.PrimaryPart or intact:FindFirstChildWhichIsA("BasePart", true)
+            hlTarget = intact
+            ad = intact.PrimaryPart or intact:FindFirstChildWhichIsA("BasePart", true) or inst
         end
+    elseif inst:IsA("Model") then
+        ad = inst.PrimaryPart or inst:FindFirstChild("HitBox") or inst:FindFirstChildWhichIsA("BasePart", true) or inst
     end
-    if inst:IsA("BasePart") then return inst end
-    return inst.PrimaryPart or inst:FindFirstChild("HitBox") or inst:FindFirstChildWhichIsA("BasePart", true)
+    OBJ[kind][inst] = { ad = ad, hlTarget = hlTarget }
 end
 
-local function highlightTargetOf(inst, kind)
-    if kind == "pallet" and inst:IsA("Model") then
-        local intact = inst:FindFirstChild("Intact")
-        if intact then return intact end
+for tag, kind in pairs(TAG_MAP) do
+    local ok, list = pcall(function() return CollectionService:GetTagged(tag) end)
+    if ok and list then
+        for _, inst in ipairs(list) do
+            registerTagged(kind, inst)
+        end
     end
-    return inst
+    track(CollectionService:GetInstanceAddedSignal(tag):Connect(function(inst)
+        task.defer(registerTagged, kind, inst)
+    end))
+    track(CollectionService:GetInstanceRemovedSignal(tag):Connect(function(inst)
+        OBJ[kind][inst] = nil
+        if objEsp[inst] then
+            destroyEntry(objEsp[inst])
+            objEsp[inst] = nil
+        end
+    end))
 end
 
 local function clearObjESP()
@@ -465,55 +411,75 @@ local function updateObjESP()
         if next(objEsp) ~= nil then clearObjESP() end
         return
     end
+
     local root = getRoot()
     local seen = {}
+    local targetFill = S.esp.fill and 0.65 or 1
+
     for kind in pairs(want) do
-        for inst in pairs(OBJ[kind]) do
-            if inst.Parent and inst:IsDescendantOf(workspace) then
-                local ad = adorneeOf(inst, kind)
-                local pos = posOf(ad or inst)
-                if ad and pos then
-                    local dist = root and (root.Position - pos).Magnitude or 0
-                    local limit = (kind == "pallet") and S.esp.palletDist or S.esp.maxDist
-                    local show = (limit <= 0) or (dist <= limit)
-                    local text = nil
-                    local col = COL[kind]
+        local col = COL[kind]
+        for inst, data in pairs(OBJ[kind]) do
+            if inst.Parent then
+                -- Untuk pallet, cek apakah model Intact masih ada (belum hancur)
+                local valid = true
+                if kind == "pallet" and inst:IsA("Model") and not inst:FindFirstChild("Intact") then
+                    valid = false
+                end
 
-                    if show and kind == "gen" then
-                        local pct = readProgress(inst) or 0
-                        if pct >= 99.9 and S.esp.hideDone then
-                            show = false
-                        else
-                            text = string.format("GEN %.0f%% (%.0fm)", pct, dist)
-                        end
-                    elseif show and kind == "pallet" then
-                        text = string.format("PALLET (%.0fm)", dist)
-                    elseif show and kind == "pumpkin" then
-                        text = string.format("LABU (%.0fm)", dist)
+                if valid then
+                    local ad = data.ad
+                    if not ad or not ad.Parent then
+                        ad = inst:FindFirstChildWhichIsA("BasePart", true)
+                        data.ad = ad
                     end
+                    local pos = posOf(ad or inst)
+                    if ad and pos then
+                        local dist = root and (root.Position - pos).Magnitude or 0
+                        local limit = (kind == "pallet") and S.esp.palletDist or S.esp.maxDist
+                        local show = (limit <= 0) or (dist <= limit)
+                        local text = nil
 
-                    if show then
-                        seen[inst] = true
-                        local e = objEsp[inst]
-                        local hlTarget = highlightTargetOf(inst, kind)
-                        if not e or not e.bb or not e.bb.Parent or not e.hl or not e.hl.Parent then
-                            destroyEntry(e)
-                            e = { kind = kind }
-                            e.hl = makeHighlight(hlTarget, col)
-                            e.bb, e.lbl = makeLabel(ad, col, (kind == "gen") and 12 or 10, (kind == "gen") and 3 or 2)
-                            objEsp[inst] = e
+                        if show and kind == "gen" then
+                            local pct = tonumber(inst:GetAttribute("RepairProgress")) or 0
+                            if pct >= 99.9 and S.esp.hideDone then
+                                show = false
+                            else
+                                text = string.format("GEN %.0f%% (%.0fm)", pct, dist)
+                            end
+                        elseif show and kind == "pallet" then
+                            text = string.format("PALLET (%.0fm)", dist)
+                        elseif show and kind == "pumpkin" then
+                            text = string.format("LABU (%.0fm)", dist)
                         end
-                        e.hl.Adornee = hlTarget
-                        e.hl.FillColor = col
-                        e.hl.OutlineColor = col
-                        e.hl.FillTransparency = S.esp.fill and 0.65 or 1
-                        e.lbl.TextColor3 = col
-                        e.lbl.Text = text
+
+                        if show then
+                            seen[inst] = true
+                            local e = objEsp[inst]
+                            local hlTarget = data.hlTarget or inst
+                            if not e or not e.bb or not e.bb.Parent or not e.hl or not e.hl.Parent then
+                                destroyEntry(e)
+                                e = { kind = kind, fill = targetFill, txt = "" }
+                                e.hl = makeHighlight(hlTarget, col)
+                                e.bb, e.lbl = makeLabel(ad, col, (kind == "gen") and 12 or 10, (kind == "gen") and 3 or 2)
+                                objEsp[inst] = e
+                            end
+                            if e.fill ~= targetFill then
+                                e.fill = targetFill
+                                e.hl.FillTransparency = targetFill
+                            end
+                            if e.txt ~= text then
+                                e.txt = text
+                                e.lbl.Text = text
+                            end
+                        end
                     end
                 end
+            else
+                OBJ[kind][inst] = nil
             end
         end
     end
+
     for inst, e in pairs(objEsp) do
         if not seen[inst] then
             destroyEntry(e)
@@ -531,106 +497,8 @@ local function countObjs(kind)
 end
 
 ------------------------------------------------------------------
--- LOW MODE (FLAT 1-WARNA / HAPUS TEKSTUR TANPA HILANGKAN BANGUNAN)
+-- LOW MODE (ANTI-LAG INSTAN TANPA FREEZE)
 ------------------------------------------------------------------
-local origPartColors = setmetatable({}, { __mode = "k" })
-
-local function isCharacterOrImportant(inst)
-    if inst == workspace.Terrain then return true end
-    local p = inst
-    while p and p ~= workspace do
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr.Character == p then return true end
-        end
-        if CollectionService:HasTag(p, "Killer") or CollectionService:HasTag(p, "Survivor") or CollectionService:HasTag(p, "Item") then
-            return true
-        end
-        p = p.Parent
-    end
-    return false
-end
-
-local function isWeatherEffect(inst)
-    local p = inst
-    while p and p ~= workspace do
-        local n = p.Name:lower()
-        if n == "rain" or n == "foggy wind" then
-            return true
-        end
-        p = p.Parent
-    end
-    return false
-end
-
-local function applyPartColorScheme(part)
-    if not origPartColors[part] then
-        origPartColors[part] = part.Color
-    end
-    local targetCol = FLAT_PALETTE[S.vis.colorScheme]
-    if targetCol then
-        part.Color = targetCol
-    else
-        part.Color = origPartColors[part]
-    end
-end
-
-local function optimizeInstance(inst)
-    if not S.vis.lowMode then return end
-    if inst:IsDescendantOf(espFolder) then return end
-    if isCharacterOrImportant(inst) then return end
-
-    -- 1. Hapus semua tekstur ditempel (SurfaceAppearance PBR, Decal, Texture) agar jadi 1 warna polos
-    if inst:IsA("SurfaceAppearance") or inst:IsA("Decal") or inst:IsA("Texture") then
-        pcall(function() inst:Destroy() end)
-        return
-    end
-
-    -- 2. Hapus TextureId pada SpecialMesh jika ada
-    if inst:IsA("SpecialMesh") then
-        pcall(function() inst.TextureId = "" end)
-        return
-    end
-
-    -- 3. Matikan partikel cuaca/efek berlebih (bukan bangunan)
-    if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles") then
-        pcall(function() inst.Enabled = false end)
-        return
-    end
-
-    -- 4. Ubah blok/bangunan menjadi SmoothPlastic polos 1 warna (TANPA mengubah Transparency bangunan!)
-    if inst:IsA("BasePart") then
-        if isWeatherEffect(inst) then
-            -- Hanya part partikel hujan/kabut cuaca yang disembunyikan
-            pcall(function() inst.Transparency = 1 end)
-            return
-        end
-
-        pcall(function()
-            inst.Material = Enum.Material.SmoothPlastic
-            inst.MaterialVariant = ""
-            inst.Reflectance = 0
-            inst.CastShadow = false
-            if inst:IsA("MeshPart") then
-                inst.TextureID = ""
-            end
-            applyPartColorScheme(inst)
-        end)
-    end
-end
-
-local function refreshColorSchemeOnly()
-    if not S.vis.lowMode then return end
-    task.spawn(function()
-        local ds = workspace:GetDescendants()
-        for i, d in ipairs(ds) do
-            if d:IsA("BasePart") and not isCharacterOrImportant(d) and not isWeatherEffect(d) then
-                pcall(applyPartColorScheme, d)
-            end
-            if i % 1000 == 0 then task.wait() end
-        end
-    end)
-end
-
 local function toggleSmartBoneWorkers(disable)
     local ps = LP:FindFirstChild("PlayerScripts")
     if not ps then return end
@@ -650,11 +518,8 @@ local function toggleSmartBoneWorkers(disable)
     end
 end
 
-local lowModeRunning = false
-local function applyLowModeBatch()
-    if not S.vis.lowMode or lowModeRunning then return end
-    lowModeRunning = true
-
+local function applyFastLowMode()
+    if not S.vis.lowMode then return end
     pcall(function()
         settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
         Lighting.GlobalShadows = false
@@ -667,63 +532,123 @@ local function applyLowModeBatch()
         pcall(toggleSmartBoneWorkers, true)
     end
 
-    task.spawn(function()
-        local ds = workspace:GetDescendants()
-        for i, d in ipairs(ds) do
-            if not S.vis.lowMode then break end
-            pcall(optimizeInstance, d)
-            if i % 600 == 0 then task.wait() end
+    -- Matikan hujan & kabut di Workspace.Map secara instan (tanpa scan ribuan part)
+    local mapFolder = workspace:FindFirstChild("Map")
+    if mapFolder then
+        local rain = mapFolder:FindFirstChild("rain")
+        if rain then
+            for _, d in ipairs(rain:GetDescendants()) do
+                if d:IsA("ParticleEmitter") or d:IsA("Beam") then
+                    pcall(function() d.Enabled = false end)
+                elseif d:IsA("BasePart") then
+                    pcall(function() d.Transparency = 1 end)
+                end
+            end
         end
-        lowModeRunning = false
+        for _, ch in ipairs(mapFolder:GetChildren()) do
+            if ch.Name == "Foggy Wind" then
+                for _, d in ipairs(ch:GetDescendants()) do
+                    if d:IsA("ParticleEmitter") or d:IsA("Beam") then
+                        pcall(function() d.Enabled = false end)
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Fungsi opsional sekali klik untuk mengubah semua blok map menjadi SmoothPlastic 1 warna
+local flattenBusy = false
+local function flattenMapBlocksOnce()
+    if flattenBusy then return end
+    flattenBusy = true
+    local targetCol = FLAT_PALETTE[S.vis.colorScheme]
+
+    task.spawn(function()
+        local folders = { workspace:FindFirstChild("Map"), workspace:FindFirstChild("Lobby") }
+        for _, rootFolder in ipairs(folders) do
+            if rootFolder then
+                local ds = rootFolder:GetDescendants()
+                for i, inst in ipairs(ds) do
+                    if inst:IsA("BasePart") then
+                        pcall(function()
+                            inst.Material = Enum.Material.SmoothPlastic
+                            inst.Reflectance = 0
+                            inst.CastShadow = false
+                            if inst:IsA("MeshPart") then
+                                inst.TextureID = ""
+                            end
+                            if targetCol and inst.Transparency < 1 then
+                                inst.Color = targetCol
+                            end
+                        end)
+                    elseif inst:IsA("SurfaceAppearance") or inst:IsA("Decal") or inst:IsA("Texture") then
+                        pcall(function() inst:Destroy() end)
+                    elseif inst:IsA("ParticleEmitter") then
+                        pcall(function() inst.Enabled = false end)
+                    end
+                    if i % 250 == 0 then task.wait() end
+                end
+            end
+        end
+        flattenBusy = false
+        Fluent:Notify({
+            Title = "Selesai",
+            Content = "Semua blok bangunan telah diubah menjadi polos 1 warna!",
+            Duration = 3
+        })
     end)
 end
 
-track(workspace.DescendantAdded:Connect(function(d)
-    if S.vis.lowMode then
-        task.defer(function()
-            pcall(optimizeInstance, d)
-        end)
-    end
-end))
-
 ------------------------------------------------------------------
--- AUTO SKILL CHECK
+-- AUTO SKILL CHECK (CACHED UI & TANPA AUTO-LEARN)
 ------------------------------------------------------------------
-local GUI_NAMES  = { "SkillCheckPromptGui", "SkillCheckPromptGui-con" }
-local VK         = { Space = 0x20, E = 0x45, F = 0x46, Q = 0x51, R = 0x52, C = 0x43, V = 0x56, X = 0x58, Z = 0x5A, G = 0x47 }
-local LEARN_KEYS = { Space = true, E = true, F = true, Q = true, R = true, C = true, V = true, X = true, Z = true, G = true }
+local GUI_NAMES = { "SkillCheckPromptGui", "SkillCheckPromptGui-con" }
+local VK        = { Space = 0x20, E = 0x45, F = 0x46, Q = 0x51, R = 0x52, C = 0x43, V = 0x56, X = 0x58, Z = 0x5A, G = 0x47 }
 
 local st = {
     active = false, pressed = false,
     goal = 0, line = 0,
     lastLine = 0, lastT = 0, speed = 250,
-    autoT = -10, cand = nil, candT = -10,
     pressLine = 0, pressTarget = 0,
-    presses = 0, samples = {}, note = "Menunggu skill check...",
+    presses = 0, note = "Menunggu skill check...",
 }
 
-local function median(t)
-    local c = {}
-    for i, v in ipairs(t) do c[i] = v end
-    table.sort(c)
-    local n = #c
-    if n == 0 then return nil end
-    if n % 2 == 1 then return c[(n + 1) / 2] end
-    return (c[n / 2] + c[n / 2 + 1]) / 2
-end
+-- Cache referensi UI agar TIDAK memanggil FindFirstChild(..., true) setiap frame
+local cachedChecks = {}
+local lastCacheScan = 0
 
-local function findCheck()
+local function refreshSkillCheckCache()
+    cachedChecks = {}
     local pg = LP:FindFirstChildOfClass("PlayerGui")
-    if not pg then return nil end
+    if not pg then return end
     for _, name in ipairs(GUI_NAMES) do
         local g = pg:FindFirstChild(name)
         if g then
-            local c = g:FindFirstChild("Check") or g:FindFirstChild("Check", true)
-            if c and c:IsA("GuiObject") and c.Visible then
+            local c = g:FindFirstChild("Check", true)
+            if c and c:IsA("GuiObject") then
                 local goal = c:FindFirstChild("Goal", true)
                 local line = c:FindFirstChild("Line", true)
-                if goal and line then return c, goal, line end
+                if goal and line then
+                    cachedChecks[#cachedChecks + 1] = { check = c, goal = goal, line = line }
+                end
             end
+        end
+    end
+end
+
+local function getActiveCheckFast(now)
+    if #cachedChecks == 0 and (now - lastCacheScan) > 1.5 then
+        lastCacheScan = now
+        refreshSkillCheckCache()
+    end
+    for i = 1, #cachedChecks do
+        local item = cachedChecks[i]
+        if item.check.Parent and item.check.Visible then
+            return item.check, item.goal, item.line
+        elseif not item.check.Parent then
+            cachedChecks = {}
+            break
         end
     end
     return nil
@@ -763,89 +688,44 @@ local function doPress()
     end
 end
 
-track(UIS.InputBegan:Connect(function(input)
-    if not st.active then return end
-    if os.clock() - st.autoT < 0.3 then return end
-    local n = nil
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        n = "Mouse"
-    elseif input.UserInputType == Enum.UserInputType.Keyboard and LEARN_KEYS[input.KeyCode.Name] then
-        n = input.KeyCode.Name
-    end
-    if n then
-        st.cand = n
-        st.candT = os.clock()
-    end
-end))
-
-local function onCheckEnd(now)
-    if st.pressed then
-        st.note = string.format("Terakhir: auto klik di Line %.0f (Target %.0f)", st.pressLine, st.pressTarget)
-        return
-    end
-    if SKC.learn and st.cand and (now - st.candT) < 0.45 then
-        if inList(st.cand, INPUT_LIST) then
-            SKC.input = st.cand
-            if Options.SKC_Input then pcall(function() Options.SKC_Input:SetValue(st.cand) end) end
-        end
-        local d = st.line - st.goal
-        if d > 85 and d < 145 then
-            st.samples[#st.samples + 1] = d
-            if #st.samples > 8 then table.remove(st.samples, 1) end
-            SKC.offset = median(st.samples) or SKC.offset
-            if Options.SKC_Offset then pcall(function() Options.SKC_Offset:SetValue(SKC.offset) end) end
-            st.note = string.format("Belajar: klik manual di Goal+%.0f -> Offset jadi %.1f", d, SKC.offset)
-            Fluent:Notify({
-                Title = "Auto Skill Check",
-                Content = string.format("Offset baru dipelajari: %.1f (%d sampel)", SKC.offset, #st.samples),
-                Duration = 3
-            })
-        else
-            st.note = string.format("Input '%s' dicatat (Goal+%.0f di luar rentang)", st.cand, d)
-        end
-    end
-    st.cand = nil
-end
-
 track(RunService.RenderStepped:Connect(function()
-    local ok = pcall(function()
-        local now = os.clock()
-        local c, goal, line = findCheck()
-        if c then
-            local gr, lr = goal.Rotation, line.Rotation
-            if not st.active then
-                st.active = true
-                st.pressed = false
-                st.lastLine, st.lastT = lr, now
-            end
-            local dt = now - st.lastT
-            if dt > 0 and lr ~= st.lastLine then
-                local sp = (lr - st.lastLine) / dt
-                if sp > 40 and sp < 400 then st.speed = st.speed * 0.8 + sp * 0.2 end
-                st.lastLine, st.lastT = lr, now
-            end
-            st.goal, st.line = gr, lr
-
-            if SKC.on and not st.pressed and gr ~= 0 then
-                local target = gr + SKC.offset
-                if lr + st.speed * SKC.lead >= target and lr < target + 40 then
-                    st.pressed = true
-                    st.autoT = now
-                    st.pressLine, st.pressTarget = lr, target
-                    st.presses = st.presses + 1
-                    task.spawn(doPress)
-                end
-            end
-        elseif st.active then
-            st.active = false
-            onCheckEnd(now)
+    if not SKC.on then return end
+    local now = os.clock()
+    local c, goal, line = getActiveCheckFast(now)
+    if c then
+        local gr, lr = goal.Rotation, line.Rotation
+        if not st.active then
+            st.active = true
+            st.pressed = false
+            st.lastLine, st.lastT = lr, now
         end
-    end)
-    if not ok then st.note = "Error di loop skill check" end
+        local dt = now - st.lastT
+        if dt > 0 and lr ~= st.lastLine then
+            local sp = (lr - st.lastLine) / dt
+            if sp > 40 and sp < 400 then st.speed = st.speed * 0.8 + sp * 0.2 end
+            st.lastLine, st.lastT = lr, now
+        end
+        st.goal, st.line = gr, lr
+
+        if not st.pressed and gr ~= 0 then
+            local target = gr + SKC.offset
+            if lr + st.speed * SKC.lead >= target and lr < target + 40 then
+                st.pressed = true
+                st.pressLine, st.pressTarget = lr, target
+                st.presses = st.presses + 1
+                task.spawn(doPress)
+            end
+        end
+    elseif st.active then
+        st.active = false
+        if st.pressed then
+            st.note = string.format("Terakhir: auto klik di Line %.0f (Target %.0f)", st.pressLine, st.pressTarget)
+        end
+    end
 end))
 
 ------------------------------------------------------------------
--- VISUAL: FULLBRIGHT & NO DARKNESS
+-- VISUAL: FULLBRIGHT & NO DARKNESS (DIPINDAH KE LOOP 0.5 DTK AGAR RINGAN)
 ------------------------------------------------------------------
 local lightOrig = nil
 local effOrig = {}
@@ -925,10 +805,6 @@ local function lightRestore()
     effOrig = {}
     darkRestore()
 end
-
-track(RunService.RenderStepped:Connect(function()
-    if S.vis.full then pcall(lightApply) end
-end))
 
 ------------------------------------------------------------------
 -- MOVE & AUTO AIM
@@ -1015,7 +891,7 @@ end)
 ------------------------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Violence District",
-    SubTitle = "Fluent Edition v3.4",
+    SubTitle = "Fluent v3.5 (Anti-Lag Edition)",
     TabWidth = 150,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -1067,14 +943,14 @@ EspCfgSec:AddSlider("ESP_MaxDist", {
 
 EspCfgSec:AddSlider("ESP_PalletDist", {
     Title = "Jarak Maks Pallet",
-    Description = "0 = tampilkan semua pallet",
-    Default = 150, Min = 0, Max = 400, Rounding = 0,
+    Description = "Disarankan 100-150m agar tidak melewati batas 31 Highlight Roblox",
+    Default = 120, Min = 0, Max = 400, Rounding = 0,
     Callback = function(v) S.esp.palletDist = v end
 })
 
 local EspInfoParagraph = Tabs.ESP:AddParagraph({
     Title = "Info Peta Saat Ini",
-    Content = "Memindai objek di Workspace..."
+    Content = "Memuat data objek..."
 })
 
 -- ================= TAB 2: CROSSHAIR =================
@@ -1121,18 +997,11 @@ CrSec:AddSlider("CR_Thick", {
     Callback = function(v) S.cross.thick = v; updateCrosshair() end
 })
 
--- ================= TAB 3: SKILL CHECK =================
+-- ================= TAB 3: SKILL CHECK (TANPA AUTO-LEARN) =================
 local SkSec = Tabs.Skill:AddSection("Auto Skill Check")
 
 local T_SkOn = SkSec:AddToggle("SKC_On", { Title = "Aktifkan Auto Skill Check", Default = true })
 T_SkOn:OnChanged(function() SKC.on = Options.SKC_On.Value end)
-
-local T_SkLearn = SkSec:AddToggle("SKC_Learn", {
-    Title = "Auto-Learn dari Klik Manual",
-    Description = "Otomatis menyesuaikan tombol & offset saat kamu menekan manual",
-    Default = true
-})
-T_SkLearn:OnChanged(function() SKC.learn = Options.SKC_Learn.Value end)
 
 local D_SkInput = SkSec:AddDropdown("SKC_Input", {
     Title = "Tombol Skill Check",
@@ -1144,6 +1013,7 @@ D_SkInput:OnChanged(function(v) SKC.input = v end)
 
 SkSec:AddSlider("SKC_Offset", {
     Title = "Offset (Line - Goal)",
+    Description = "Nilai tetap (tidak berubah sendiri)",
     Default = 115, Min = 60, Max = 170, Rounding = 1,
     Callback = function(v) SKC.offset = v end
 })
@@ -1158,7 +1028,6 @@ SkSec:AddButton({
     Title = "Reset Offset ke Default (115)",
     Callback = function()
         SKC.offset = 115
-        st.samples = {}
         if Options.SKC_Offset then Options.SKC_Offset:SetValue(115) end
         Fluent:Notify({ Title = "Skill Check", Content = "Offset dikembalikan ke 115", Duration = 2 })
     end
@@ -1230,36 +1099,17 @@ AimSec:AddSlider("AIM_Smooth", {
 })
 
 -- ================= TAB 5: VISUAL & LOW MODE =================
-local LowSec = Tabs.Visual:AddSection("Low Mode (Bangunan Utuh + Polos 1 Warna)")
+local LowSec = Tabs.Visual:AddSection("Fast Low Mode (Tanpa Lag/Freeze)")
 
 local T_LowMode = LowSec:AddToggle("VIS_LowMode", {
-    Title = "Aktifkan Low Mode (Hapus Tekstur Blok)",
-    Description = "Bangunan tetap utuh, semua tekstur diubah jadi blok polos SmoothPlastic 1 warna",
+    Title = "Aktifkan Fast Low Mode",
+    Description = "Matikan bayangan, hujan, kabut & SmartBone secara instan tanpa membebani CPU",
     Default = false
 })
 T_LowMode:OnChanged(function()
     S.vis.lowMode = Options.VIS_LowMode.Value
     if S.vis.lowMode then
-        applyLowModeBatch()
-        Fluent:Notify({
-            Title = "Low Mode Aktif",
-            Content = "Tekstur bangunan dihapus menjadi blok 1 warna polos (bangunan tetap utuh).",
-            Duration = 3
-        })
-    end
-end)
-
-local D_ColScheme = LowSec:AddDropdown("VIS_ColorScheme", {
-    Title = "Mode Warna Blok Bangunan",
-    Description = "Original = warna dasar tiap blok, lainnya = ratakan semua blok jadi 1 warna",
-    Values = { "Original", "SlateGrey", "DarkGrey", "LightGrey" },
-    Multi = false,
-    Default = 1,
-})
-D_ColScheme:OnChanged(function(v)
-    S.vis.colorScheme = v
-    if S.vis.lowMode then
-        refreshColorSchemeOnly()
+        applyFastLowMode()
     end
 end)
 
@@ -1275,14 +1125,21 @@ T_DisBones:OnChanged(function()
     end
 end)
 
+local D_ColScheme = LowSec:AddDropdown("VIS_ColorScheme", {
+    Title = "Pilihan Warna Blok Polos",
+    Values = { "Original", "SlateGrey", "DarkGrey", "LightGrey" },
+    Multi = false,
+    Default = 1,
+})
+D_ColScheme:OnChanged(function(v)
+    S.vis.colorScheme = v
+end)
+
 LowSec:AddButton({
-    Title = "Terapkan Ulang Low Mode (Refresh Map)",
-    Description = "Klik saat baru pindah map / ronde baru",
+    Title = "Ubah Bangunan Jadi Blok Polos 1 Warna (Sekali Klik)",
+    Description = "Gunakan saat ronde dimulai untuk menghapus tekstur blok tanpa background lag",
     Callback = function()
-        S.vis.lowMode = true
-        if Options.VIS_LowMode then Options.VIS_LowMode:SetValue(true) end
-        applyLowModeBatch()
-        Fluent:Notify({ Title = "Low Mode", Content = "Seluruh blok bangunan disederhanakan!", Duration = 2 })
+        flattenMapBlocksOnce()
     end
 })
 
@@ -1291,7 +1148,11 @@ local VisSec = Tabs.Visual:AddSection("Pencahayaan & Efek")
 local T_VisFull = VisSec:AddToggle("VIS_Full", { Title = "Fullbright (Terang & Hapus Kabut)", Default = false })
 T_VisFull:OnChanged(function()
     S.vis.full = Options.VIS_Full.Value
-    if not S.vis.full then lightRestore() end
+    if S.vis.full then
+        pcall(lightApply)
+    else
+        pcall(lightRestore)
+    end
 end)
 
 local T_VisDark = VisSec:AddToggle("VIS_NoDark", { Title = "Hilangkan Layar Gelap (Darkness GUI)", Default = true })
@@ -1303,7 +1164,10 @@ end)
 VisSec:AddSlider("VIS_Bright", {
     Title = "Tingkat Brightness",
     Default = 2, Min = 0, Max = 6, Rounding = 1,
-    Callback = function(v) S.vis.bright = v end
+    Callback = function(v)
+        S.vis.bright = v
+        if S.vis.full then pcall(lightApply) end
+    end
 })
 
 -- ================= TAB 6: SETTINGS =================
@@ -1348,29 +1212,40 @@ Tabs.Settings:AddButton({
     Callback = destroyHub
 })
 
+-- Loop utama diperlambat sedikit (0.3 detik) dan hemat alokasi string
 task.spawn(function()
+    local lastInfoStr = ""
+    local lastSkStr = ""
     while alive do
-        task.wait(0.25)
+        task.wait(0.3)
         pcall(updatePlayersESP)
         pcall(updateObjESP)
+        if S.vis.full then pcall(lightApply) end
 
         pcall(function()
-            EspInfoParagraph:SetDesc(string.format(
-                "Role Kamu: %s  |  Gen: %d  |  Pallet: %d  |  Labu: %d%s",
+            local infoStr = string.format(
+                "Role Kamu: %s  |  Gen: %d  |  Pallet: %d  |  Labu: %d",
                 tostring(roleOf(LP) or "Lobby"),
                 countObjs("gen"),
                 countObjs("pallet"),
-                countObjs("pumpkin"),
-                scanDone and "" or " (Scanning...)"
-            ))
+                countObjs("pumpkin")
+            )
+            if infoStr ~= lastInfoStr then
+                lastInfoStr = infoStr
+                EspInfoParagraph:SetDesc(infoStr)
+            end
 
             local stateStr = st.active
                 and string.format("AKTIF (Goal: %.0f | Line: %.0f | Target: %.0f)", st.goal, st.line, st.goal + SKC.offset)
                 or st.note
-            SkStatusParagraph:SetDesc(string.format(
+            local skStr = string.format(
                 "Tombol: %s  |  Offset: %.1f  |  Speed Jarum: %.0f/dtk  |  Auto Klik: %d\n%s",
                 SKC.input, SKC.offset, st.speed, st.presses, stateStr
-            ))
+            )
+            if skStr ~= lastSkStr then
+                lastSkStr = skStr
+                SkStatusParagraph:SetDesc(skStr)
+            end
         end)
     end
 end)
@@ -1380,6 +1255,6 @@ SaveManager:LoadAutoloadConfig()
 
 Fluent:Notify({
     Title = "Violence District",
-    Content = "Fluent Hub v3.4 siap! Low Mode kini menjaga bangunan tetap utuh.",
+    Content = "Fluent Hub v3.5 (Anti-Lag) siap dijalankan!",
     Duration = 4
 })
