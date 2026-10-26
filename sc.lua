@@ -1,26 +1,22 @@
 --[[
 =====================================================================
-  ViolenceDistrict_Hub.lua  (v3)  -  gabungan Hub + Auto Skill Check
-
-  ESP     : killer (merah), survivor (biru muda), generator (kuning),
-            pallet (ungu), label ringkas
-  Skill   : auto skill check (dari script VD Auto Skill Check v3):
-            belajar tombol & offset dari klik manual kamu
-  Move    : speed boost
-  Visual  : fullbright + hilangkan layar gelap
-  Aim     : auto aim saat klik kanan ditahan
-  Config  : pengaturan tersimpan di VD_Hub_Config.json (workspace executor)
-
-  RightShift = sembunyikan / tampilkan window
-  Kalau script "VD Auto Skill Check v3" standalone masih jalan, script ini
-  mematikannya otomatis supaya tidak dobel klik.
+  ViolenceDistrict_Hub.lua  (v3.1 Fixed)
+  
+  Perbaikan & Fitur:
+  - ESP Killer    : Merah + Highlight (Deteksi Tag & Team)
+  - ESP Survivor  : Hijau + Highlight (Deteksi Tag, Attribute & Team)
+  - ESP Pallet    : Ungu + Highlight (Filter khusus pallet aktif)
+  - ESP Generator : Kuning + Highlight + Progress (RepairProgress)
+  - ESP Labu      : Cyan + Highlight (Tag "pumpkin" / Folder Pumpkins)
+  - Crosshair     : Custom Crosshair di tengah layar (Tab Crosshair)
+  - Auto Skill Check, Speed Boost, Fullbright, Auto Aim
 =====================================================================
 ]]
 
 ------------------------------------------------------------------
 -- BOOT
 ------------------------------------------------------------------
-local CFG = { UI_KEY = Enum.KeyCode.RightShift, CONFIG_FILE = "VD_Hub_Config.json" }
+local CFG = { UI_KEY = Enum.KeyCode.RightShift, CONFIG_FILE = "VD_Hub_Config_v31.json" }
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
 if genv.MAG_VD and type(genv.MAG_VD.destroy) == "function" then
@@ -51,29 +47,47 @@ local function track(c)
     return c
 end
 
-local notify = function() end   -- diisi setelah GUI dibuat
+local notify = function() end
 
 local S = {
-    esp  = { killer = false, survivor = false, gens = false, pallets = false,
-             hideDone = true, fill = false, maxDist = 0, palletDist = 60 },
+    esp = {
+        killer = true,
+        survivor = true,
+        gens = true,
+        pallets = true,
+        pumpkins = true,
+        hideDone = true,
+        fill = true,
+        maxDist = 0,
+        palletDist = 150
+    },
+    cross = {
+        on = true,
+        dot = true,
+        size = 8,
+        gap = 4,
+        thick = 2,
+        color = "Green"
+    },
     move = { on = false, mode = "WalkSpeed", ws = 24, cf = 10 },
     vis  = { full = false, bright = 2, noDark = true },
     aim  = { on = false, fov = 250, dist = 150, smooth = 0.5, part = "HumanoidRootPart", wall = true },
 }
 
--- konfigurasi auto skill check (dari script standalone)
 local SKC = { on = true, input = "Space", offset = 115, lead = 0.03, learn = true }
-local INPUT_LIST = { "Space", "Mouse", "E", "F" }
-local AIM_PARTS  = { "HumanoidRootPart", "Head", "Torso" }
+local INPUT_LIST  = { "Space", "Mouse", "E", "F" }
+local AIM_PARTS   = { "HumanoidRootPart", "Head", "Torso" }
+local CROSS_COLS  = {
+    Green  = Color3.fromRGB(0, 255, 120),
+    Cyan   = Color3.fromRGB(0, 255, 255),
+    Red    = Color3.fromRGB(255, 50, 50),
+    Yellow = Color3.fromRGB(255, 230, 50),
+    White  = Color3.fromRGB(255, 255, 255),
+}
 
 ------------------------------------------------------------------
 -- HELPER
 ------------------------------------------------------------------
-local function parseNum(s)
-    local t = tostring(s):lower():gsub("[%s,%$]", "")
-    return tonumber(t) or 0
-end
-
 local function sortedKeys(t)
     local ks = {}
     for k in pairs(t) do ks[#ks + 1] = k end
@@ -125,10 +139,6 @@ local function attrLine(inst)
     return table.concat(parts, ", ")
 end
 
-local function hex(c)
-    return string.format("%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
-end
-
 local function getRoot()
     local c = LP.Character
     return c and c:FindFirstChild("HumanoidRootPart"), c
@@ -166,20 +176,39 @@ local function writeOut(name, lines)
     return (pcall(writefile, name, table.concat(lines, "\n")))
 end
 
+-- Deteksi Role berdasarkan CollectionService Tag, Attribute, dan Team
 local function roleOf(plr)
+    if not plr then return nil end
+    local char = plr.Character
+    if char then
+        if CollectionService:HasTag(char, "Killer") then return "Killer" end
+        if CollectionService:HasTag(char, "Survivor") then return "Survivor" end
+    end
+    if CollectionService:HasTag(plr, "Killer") then return "Killer" end
+    if CollectionService:HasTag(plr, "Survivor") then return "Survivor" end
+
     local t = plr.Team
-    if t == nil then return nil end
-    if t.Name == "Killer" then return "Killer" end
-    if t.Name == "Survivors" then return "Survivor" end
+    if t then
+        if t.Name == "Killer" then return "Killer" end
+        if t.Name == "Survivors" or t.Name == "Survivor" then return "Survivor" end
+    end
+
+    if plr:GetAttribute("RoundSurvivor") == true then return "Survivor" end
     return nil
 end
 
--- warna ESP: tiap jenis punya warna sendiri
+-- Warna ESP sesuai permintaan:
+-- 1. Killer (Merah)
+-- 2. Survivor (Hijau)
+-- 3. Pallet (Ungu)
+-- 4. Generator (Kuning)
+-- 5. Labu (Cyan)
 local COL = {
-    killer   = Color3.fromRGB(255, 50, 50),
-    survivor = Color3.fromRGB(60, 200, 255),
-    gen      = Color3.fromRGB(255, 225, 60),
-    pallet   = Color3.fromRGB(190, 100, 255),
+    killer   = Color3.fromRGB(255, 45, 45),
+    survivor = Color3.fromRGB(50, 255, 90),
+    pallet   = Color3.fromRGB(190, 80, 255),
+    gen      = Color3.fromRGB(255, 230, 40),
+    pumpkin  = Color3.fromRGB(0, 255, 255),
 }
 
 ------------------------------------------------------------------
@@ -191,11 +220,16 @@ local function markDirty() cfgDirty = true end
 local function cfgSave()
     if type(writefile) ~= "function" then return false end
     local data = {
-        sk   = { on = SKC.on, input = SKC.input, offset = SKC.offset, lead = SKC.lead, learn = SKC.learn },
-        esp  = { hideDone = S.esp.hideDone, fill = S.esp.fill, maxDist = S.esp.maxDist, palletDist = S.esp.palletDist },
-        move = { mode = S.move.mode, ws = S.move.ws, cf = S.move.cf },
-        vis  = { bright = S.vis.bright, noDark = S.vis.noDark },
-        aim  = { fov = S.aim.fov, dist = S.aim.dist, smooth = S.aim.smooth, part = S.aim.part, wall = S.aim.wall },
+        sk    = { on = SKC.on, input = SKC.input, offset = SKC.offset, lead = SKC.lead, learn = SKC.learn },
+        esp   = {
+            killer = S.esp.killer, survivor = S.esp.survivor, gens = S.esp.gens,
+            pallets = S.esp.pallets, pumpkins = S.esp.pumpkins,
+            hideDone = S.esp.hideDone, fill = S.esp.fill, maxDist = S.esp.maxDist, palletDist = S.esp.palletDist
+        },
+        cross = { on = S.cross.on, dot = S.cross.dot, size = S.cross.size, gap = S.cross.gap, thick = S.cross.thick, color = S.cross.color },
+        move  = { mode = S.move.mode, ws = S.move.ws, cf = S.move.cf },
+        vis   = { bright = S.vis.bright, noDark = S.vis.noDark },
+        aim   = { fov = S.aim.fov, dist = S.aim.dist, smooth = S.aim.smooth, part = S.aim.part, wall = S.aim.wall },
     }
     local ok, js = pcall(function() return HttpService:JSONEncode(data) end)
     if not ok then return false end
@@ -226,10 +260,23 @@ local function cfgLoad()
         if type(t.sk.input) == "string" and inList(t.sk.input, INPUT_LIST) then SKC.input = t.sk.input end
     end
     if type(t.esp) == "table" then
+        setBool(S.esp, "killer", t.esp.killer)
+        setBool(S.esp, "survivor", t.esp.survivor)
+        setBool(S.esp, "gens", t.esp.gens)
+        setBool(S.esp, "pallets", t.esp.pallets)
+        setBool(S.esp, "pumpkins", t.esp.pumpkins)
         setBool(S.esp, "hideDone", t.esp.hideDone)
         setBool(S.esp, "fill", t.esp.fill)
         setNum(S.esp, "maxDist", t.esp.maxDist, 0, 1000)
         setNum(S.esp, "palletDist", t.esp.palletDist, 0, 1000)
+    end
+    if type(t.cross) == "table" then
+        setBool(S.cross, "on", t.cross.on)
+        setBool(S.cross, "dot", t.cross.dot)
+        setNum(S.cross, "size", t.cross.size, 2, 30)
+        setNum(S.cross, "gap", t.cross.gap, 0, 25)
+        setNum(S.cross, "thick", t.cross.thick, 1, 8)
+        if type(t.cross.color) == "string" and CROSS_COLS[t.cross.color] then S.cross.color = t.cross.color end
     end
     if type(t.move) == "table" then
         if t.move.mode == "WalkSpeed" or t.move.mode == "CFrame" then S.move.mode = t.move.mode end
@@ -252,6 +299,79 @@ end
 cfgLoad()
 
 ------------------------------------------------------------------
+-- CROSSHAIR OVERLAY
+------------------------------------------------------------------
+local crossGui = Instance.new("ScreenGui")
+crossGui.Name = "MAG_VD_Crosshair"
+crossGui.IgnoreGuiInset = true
+crossGui.ResetOnSpawn = false
+crossGui.DisplayOrder = 999
+mount(crossGui)
+
+local crossRoot = Instance.new("Frame")
+crossRoot.Name = "Center"
+crossRoot.AnchorPoint = Vector2.new(0.5, 0.5)
+crossRoot.Position = UDim2.new(0.5, 0, 0.5, 0)
+crossRoot.Size = UDim2.new(0, 0, 0, 0)
+crossRoot.BackgroundTransparency = 1
+crossRoot.Parent = crossGui
+
+local function mkCrossBar(name)
+    local f = Instance.new("Frame")
+    f.Name = name
+    f.BorderSizePixel = 0
+    f.AnchorPoint = Vector2.new(0.5, 0.5)
+    local st = Instance.new("UIStroke")
+    st.Color = Color3.new(0, 0, 0)
+    st.Thickness = 1
+    st.Transparency = 0.35
+    st.Parent = f
+    f.Parent = crossRoot
+    return f
+end
+
+local crTop   = mkCrossBar("Top")
+local crBot   = mkCrossBar("Bottom")
+local crLeft  = mkCrossBar("Left")
+local crRight = mkCrossBar("Right")
+local crDot   = mkCrossBar("Dot")
+
+local function updateCrosshair()
+    crossRoot.Visible = S.cross.on
+    if not S.cross.on then return end
+
+    local col = CROSS_COLS[S.cross.color] or CROSS_COLS.Green
+    local sz  = S.cross.size
+    local gap = S.cross.gap
+    local th  = S.cross.thick
+    local off = gap + (sz / 2)
+
+    crTop.BackgroundColor3   = col
+    crBot.BackgroundColor3   = col
+    crLeft.BackgroundColor3  = col
+    crRight.BackgroundColor3 = col
+    crDot.BackgroundColor3   = col
+
+    crTop.Size     = UDim2.new(0, th, 0, sz)
+    crTop.Position = UDim2.new(0, 0, 0, -off)
+
+    crBot.Size     = UDim2.new(0, th, 0, sz)
+    crBot.Position = UDim2.new(0, 0, 0, off)
+
+    crLeft.Size     = UDim2.new(0, sz, 0, th)
+    crLeft.Position = UDim2.new(0, -off, 0, 0)
+
+    crRight.Size     = UDim2.new(0, sz, 0, th)
+    crRight.Position = UDim2.new(0, off, 0, 0)
+
+    crDot.Visible  = S.cross.dot
+    crDot.Size     = UDim2.new(0, th, 0, th)
+    crDot.Position = UDim2.new(0, 0, 0, 0)
+end
+
+updateCrosshair()
+
+------------------------------------------------------------------
 -- ESP: kontainer & label ringkas
 ------------------------------------------------------------------
 local espFolder = Instance.new("Folder")
@@ -264,7 +384,7 @@ local function makeLabel(adornee, color, size, offsetY)
     bb.Adornee = adornee
     bb.AlwaysOnTop = true
     bb.LightInfluence = 0
-    bb.Size = UDim2.new(0, 130, 0, 14)
+    bb.Size = UDim2.new(0, 140, 0, 15)
     bb.StudsOffset = Vector3.new(0, offsetY or 2.5, 0)
     bb.MaxDistance = 1e9
     local t = Instance.new("TextLabel")
@@ -273,7 +393,7 @@ local function makeLabel(adornee, color, size, offsetY)
     t.Font = Enum.Font.GothamBold
     t.TextSize = size or 11
     t.TextColor3 = color
-    t.TextStrokeTransparency = 0.5
+    t.TextStrokeTransparency = 0.35
     t.TextStrokeColor3 = Color3.new(0, 0, 0)
     t.Parent = bb
     bb.Parent = espFolder
@@ -285,7 +405,7 @@ local function makeHighlight(adornee, color)
     hl.Adornee = adornee
     hl.FillColor = color
     hl.OutlineColor = color
-    hl.FillTransparency = S.esp.fill and 0.8 or 1
+    hl.FillTransparency = S.esp.fill and 0.65 or 1
     hl.OutlineTransparency = 0
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     hl.Parent = espFolder
@@ -299,7 +419,7 @@ local function destroyEntry(e)
 end
 
 ------------------------------------------------------------------
--- ESP: pemain
+-- ESP: pemain (Killer & Survivor)
 ------------------------------------------------------------------
 local pEsp = {}
 
@@ -316,29 +436,36 @@ local function updatePlayersESP()
     local root = getRoot()
     local seen = {}
     for _, plr in ipairs(Players:GetPlayers()) do
-        local role = (plr ~= LP) and roleOf(plr) or nil
-        local wanted = (role == "Killer" and S.esp.killer) or (role == "Survivor" and S.esp.survivor)
-        local char = plr.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if wanted and hrp then
-            local dist = root and (root.Position - hrp.Position).Magnitude or 0
-            if S.esp.maxDist <= 0 or dist <= S.esp.maxDist then
-                seen[plr] = true
-                local col = (role == "Killer") and COL.killer or COL.survivor
-                local e = pEsp[plr]
-                if not e or e.char ~= char or not e.bb.Parent then
-                    destroyEntry(e)
-                    e = { char = char }
-                    e.hl = makeHighlight(char, col)
-                    e.bb, e.lbl = makeLabel(hrp, col, 11, 3.2)
-                    pEsp[plr] = e
+        if plr ~= LP then
+            local role = roleOf(plr)
+            local wanted = (role == "Killer" and S.esp.killer) or (role == "Survivor" and S.esp.survivor)
+            local char = plr.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if wanted and char and hrp then
+                local dist = root and (root.Position - hrp.Position).Magnitude or 0
+                if S.esp.maxDist <= 0 or dist <= S.esp.maxDist then
+                    seen[plr] = true
+                    local col = (role == "Killer") and COL.killer or COL.survivor
+                    local e = pEsp[plr]
+                    if not e or e.char ~= char or not e.bb.Parent or not e.hl.Parent then
+                        destroyEntry(e)
+                        e = { char = char }
+                        e.hl = makeHighlight(char, col)
+                        e.bb, e.lbl = makeLabel(hrp, col, 11, 3.2)
+                        pEsp[plr] = e
+                    end
+                    e.hl.FillColor = col
+                    e.hl.OutlineColor = col
+                    e.hl.FillTransparency = S.esp.fill and 0.65 or 1
+                    e.lbl.TextColor3 = col
+
+                    local tags = ""
+                    if char:GetAttribute("Knocked") == true then tags = tags .. " [DOWN]" end
+                    local hc = tonumber(char:GetAttribute("HookCount")) or 0
+                    if hc > 0 then tags = tags .. " [H" .. string.format("%.0f", hc) .. "]" end
+                    local prefix = (role == "Killer") and "[KILLER] " or ""
+                    e.lbl.Text = string.format("%s%s (%.0fm)%s", prefix, plr.Name:sub(1, 14), dist, tags)
                 end
-                e.hl.FillTransparency = S.esp.fill and 0.8 or 1
-                local tags = ""
-                if char:GetAttribute("Knocked") == true then tags = tags .. " DOWN" end
-                local hc = tonumber(char:GetAttribute("HookCount")) or 0
-                if hc > 0 then tags = tags .. " H" .. string.format("%.0f", hc) end
-                e.lbl.Text = string.format("%s  %.0fm%s", plr.Name:sub(1, 14), dist, tags)
             end
         end
     end
@@ -351,26 +478,36 @@ local function updatePlayersESP()
 end
 
 ------------------------------------------------------------------
--- ESP: generator & pallet
+-- ESP: Generator, Pallet & Labu (Pumpkin)
 ------------------------------------------------------------------
-local OBJ = { gen = {}, pallet = {} }
+local OBJ = { gen = {}, pallet = {}, pumpkin = {} }
 local objEsp = {}
 local scanDone = false
 
 local function classify(inst)
     if not (inst:IsA("Model") or inst:IsA("BasePart")) then return nil end
+
+    -- 1. Generator
     if CollectionService:HasTag(inst, "Generator") then return "gen" end
+    if inst:IsA("Model") and inst.Name == "Generator" and inst.Parent and inst.Parent.Name == "Generators" then
+        return "gen"
+    end
+
+    -- 2. Pallet
     if CollectionService:HasTag(inst, "pallet") then return "pallet" end
-    local n = string.lower(inst.Name)
-    if n:find("generator", 1, true) or n:match("^gen[%s_%-]?%d*$") then return "gen" end
-    if n:find("pallet", 1, true) then return "pallet" end
+    if inst.Parent and inst.Parent.Name:lower() == "pallets" then return "pallet" end
+
+    -- 3. Labu (Pumpkin)
+    if CollectionService:HasTag(inst, "pumpkin") then return "pumpkin" end
+    if inst.Parent and inst.Parent.Name:lower() == "pumpkins" then return "pumpkin" end
+
     return nil
 end
 
 local function ancestorRegistered(inst)
     local p = inst.Parent
     while p and p ~= workspace do
-        if OBJ.gen[p] or OBJ.pallet[p] then return true end
+        if OBJ.gen[p] or OBJ.pallet[p] or OBJ.pumpkin[p] then return true end
         p = p.Parent
     end
     return false
@@ -384,10 +521,19 @@ local function considerObj(inst)
     for _, d in ipairs(inst:GetDescendants()) do
         OBJ.gen[d] = nil
         OBJ.pallet[d] = nil
+        OBJ.pumpkin[d] = nil
     end
 end
 
 task.spawn(function()
+    for _, tag in ipairs({ "Generator", "pallet", "pumpkin" }) do
+        local ok, list = pcall(function() return CollectionService:GetTagged(tag) end)
+        if ok and list then
+            for _, inst in ipairs(list) do
+                pcall(considerObj, inst)
+            end
+        end
+    end
     local ds = workspace:GetDescendants()
     for i, d in ipairs(ds) do
         pcall(considerObj, d)
@@ -402,6 +548,7 @@ end))
 track(workspace.DescendantRemoving:Connect(function(d)
     OBJ.gen[d] = nil
     OBJ.pallet[d] = nil
+    OBJ.pumpkin[d] = nil
 end))
 
 local PROG_WORDS = { "progress", "percent", "repair", "charge", "complet", "fill" }
@@ -415,9 +562,23 @@ local function readProgress(inst)
     return nil
 end
 
-local function adorneeOf(inst)
+local function adorneeOf(inst, kind)
+    if kind == "pallet" and inst:IsA("Model") then
+        local intact = inst:FindFirstChild("Intact")
+        if intact then
+            return intact.PrimaryPart or intact:FindFirstChildWhichIsA("BasePart", true)
+        end
+    end
     if inst:IsA("BasePart") then return inst end
-    return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+    return inst.PrimaryPart or inst:FindFirstChild("HitBox") or inst:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function highlightTargetOf(inst, kind)
+    if kind == "pallet" and inst:IsA("Model") then
+        local intact = inst:FindFirstChild("Intact")
+        if intact then return intact end
+    end
+    return inst
 end
 
 local function clearObjESP()
@@ -429,6 +590,7 @@ local function updateObjESP()
     local want = {}
     if S.esp.gens then want.gen = true end
     if S.esp.pallets then want.pallet = true end
+    if S.esp.pumpkins then want.pumpkin = true end
     if next(want) == nil then
         if next(objEsp) ~= nil then clearObjESP() end
         return
@@ -438,40 +600,44 @@ local function updateObjESP()
     for kind in pairs(want) do
         for inst in pairs(OBJ[kind]) do
             if inst.Parent and inst:IsDescendantOf(workspace) then
-                local ad = adorneeOf(inst)
-                local pos = posOf(inst)
+                local ad = adorneeOf(inst, kind)
+                local pos = posOf(ad or inst)
                 if ad and pos then
                     local dist = root and (root.Position - pos).Magnitude or 0
                     local limit = (kind == "pallet") and S.esp.palletDist or S.esp.maxDist
                     local show = (limit <= 0) or (dist <= limit)
                     local text = nil
+                    local col = COL[kind]
+
                     if show and kind == "gen" then
-                        local pct = readProgress(inst)
-                        if pct and pct >= 99.9 and S.esp.hideDone then
+                        local pct = readProgress(inst) or 0
+                        if pct >= 99.9 and S.esp.hideDone then
                             show = false
-                        elseif pct then
-                            text = string.format("GEN %.0f%%", pct)
                         else
-                            text = "GEN ?"
+                            text = string.format("GEN %.0f%% (%.0fm)", pct, dist)
                         end
-                    elseif show then
-                        text = "PALLET"
+                    elseif show and kind == "pallet" then
+                        text = string.format("PALLET (%.0fm)", dist)
+                    elseif show and kind == "pumpkin" then
+                        text = string.format("LABU (%.0fm)", dist)
                     end
+
                     if show then
                         seen[inst] = true
                         local e = objEsp[inst]
-                        if not e or not e.bb.Parent then
+                        local hlTarget = highlightTargetOf(inst, kind)
+                        if not e or not e.bb or not e.bb.Parent or not e.hl or not e.hl.Parent then
                             destroyEntry(e)
                             e = { kind = kind }
-                            if kind == "gen" then
-                                e.hl = makeHighlight(inst, COL.gen)
-                                e.bb, e.lbl = makeLabel(ad, COL.gen, 12, 3)
-                            else
-                                e.bb, e.lbl = makeLabel(ad, COL.pallet, 10, 2)
-                            end
+                            e.hl = makeHighlight(hlTarget, col)
+                            e.bb, e.lbl = makeLabel(ad, col, (kind == "gen") and 12 or 10, (kind == "gen") and 3 or 2)
                             objEsp[inst] = e
                         end
-                        if e.hl then e.hl.FillTransparency = S.esp.fill and 0.8 or 1 end
+                        e.hl.Adornee = hlTarget
+                        e.hl.FillColor = col
+                        e.hl.OutlineColor = col
+                        e.hl.FillTransparency = S.esp.fill and 0.65 or 1
+                        e.lbl.TextColor3 = col
                         e.lbl.Text = text
                     end
                 end
@@ -495,7 +661,7 @@ local function countObjs(kind)
 end
 
 ------------------------------------------------------------------
--- SKILL: auto skill check (dari VD Auto Skill Check v3)
+-- SKILL: auto skill check
 ------------------------------------------------------------------
 local GUI_NAMES  = { "SkillCheckPromptGui", "SkillCheckPromptGui-con" }
 local VK         = { Space = 0x20, E = 0x45, F = 0x46, Q = 0x51, R = 0x52, C = 0x43, V = 0x56, X = 0x58, Z = 0x5A, G = 0x47 }
@@ -520,7 +686,6 @@ local function median(t)
     return (c[n / 2] + c[n / 2 + 1]) / 2
 end
 
--- Goal dan Line ada DI DALAM frame Check, jadi cari ke dalam (recursive)
 local function findCheck()
     local pg = LP:FindFirstChildOfClass("PlayerGui")
     if not pg then return nil end
@@ -572,10 +737,9 @@ local function doPress()
     end
 end
 
--- catat tombol yang kamu tekan saat skill check (untuk belajar)
 track(UIS.InputBegan:Connect(function(input)
     if not st.active then return end
-    if os.clock() - st.autoT < 0.3 then return end -- abaikan input buatan sendiri
+    if os.clock() - st.autoT < 0.3 then return end
     local n = nil
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         n = "Mouse"
@@ -621,7 +785,6 @@ track(RunService.RenderStepped:Connect(function()
                 st.pressed = false
                 st.lastLine, st.lastT = lr, now
             end
-            -- estimasi kecepatan jarum
             local dt = now - st.lastT
             if dt > 0 and lr ~= st.lastLine then
                 local sp = (lr - st.lastLine) / dt
@@ -820,89 +983,17 @@ end)
 ------------------------------------------------------------------
 -- DEBUG: dump
 ------------------------------------------------------------------
-local function groupChildren(inst, indent, cap, out)
-    local groups, order = {}, {}
-    for _, c in ipairs(inst:GetChildren()) do
-        local key = c.ClassName .. "|" .. c.Name
-        local g = groups[key]
-        if not g then
-            g = { n = 0, cls = c.ClassName, name = c.Name, sample = c }
-            groups[key] = g
-            order[#order + 1] = g
-        end
-        g.n = g.n + 1
-    end
-    table.sort(order, function(a, b) return a.n > b.n end)
-    for i, g in ipairs(order) do
-        if i > cap then
-            out[#out + 1] = indent .. "..."
-            break
-        end
-        out[#out + 1] = string.format("%s[%s] %s%s (anak: %d)", indent, g.cls, g.name, g.n > 1 and (" x" .. g.n) or "", #g.sample:GetChildren())
-    end
-    return order
-end
-
-local function describeObj(inst, out)
-    out[#out + 1] = "OBJ " .. path(inst) .. " [" .. inst.ClassName .. "]"
-    out[#out + 1] = "  attr: " .. attrLine(inst)
-    out[#out + 1] = "  tags: " .. table.concat(CollectionService:GetTags(inst), ",")
-    local n = 0
-    for _, d in ipairs(inst:GetDescendants()) do
-        n = n + 1
-        if n > 60 then
-            out[#out + 1] = "  ..."
-            break
-        end
-        local line = "  + " .. d.ClassName .. " " .. (d.Parent and d.Parent.Name or "") .. "/" .. d.Name
-        if d:IsA("ValueBase") then line = line .. " = " .. fmtv(d.Value) end
-        local a = attrLine(d)
-        if a ~= "" then line = line .. " {" .. a .. "}" end
-        out[#out + 1] = line
-    end
-end
-
-local function nearestOf(kind)
-    local root = getRoot()
-    local best, bd = nil, math.huge
-    for inst in pairs(OBJ[kind]) do
-        if inst.Parent then
-            local p = posOf(inst)
-            if p then
-                local d = root and (root.Position - p).Magnitude or 0
-                if d < bd then best, bd = inst, d end
-            end
-        end
-    end
-    return best
-end
-
 local function dumpDebug()
     local out = {}
     out[#out + 1] = "VD debug " .. os.date("%Y-%m-%d %H:%M:%S")
-    out[#out + 1] = "Team kamu: " .. tostring(LP.Team and LP.Team.Name) .. "  role=" .. tostring(roleOf(LP))
+    out[#out + 1] = "Role kamu: " .. tostring(roleOf(LP))
     for _, plr in ipairs(Players:GetPlayers()) do
-        out[#out + 1] = string.format("  player %s team=%s", plr.Name, tostring(plr.Team and plr.Team.Name))
+        out[#out + 1] = string.format("  player %s role=%s", plr.Name, tostring(roleOf(plr)))
     end
-    out[#out + 1] = string.format("Terdeteksi: generator=%d pallet=%d (scan awal selesai=%s)", countObjs("gen"), countObjs("pallet"), tostring(scanDone))
-    for _, kind in ipairs({ "gen", "pallet" }) do
-        out[#out + 1] = ""
-        out[#out + 1] = "== daftar " .. kind
-        for inst in pairs(OBJ[kind]) do
-            if inst.Parent then
-                out[#out + 1] = string.format("  %s  progress=%s", path(inst), fmtv(readProgress(inst)))
-            end
-        end
-        local near = nearestOf(kind)
-        if near then
-            out[#out + 1] = ""
-            out[#out + 1] = "== " .. kind .. " terdekat"
-            describeObj(near, out)
-        end
-    end
-    out[#out + 1] = ""
-    out[#out + 1] = "== Workspace (anak langsung)"
-    groupChildren(workspace, "  ", 60, out)
+    out[#out + 1] = string.format(
+        "Terdeteksi: generator=%d pallet=%d labu=%d (scan selesai=%s)",
+        countObjs("gen"), countObjs("pallet"), countObjs("pumpkin"), tostring(scanDone)
+    )
     return writeOut("VD_Debug.txt", out)
 end
 
@@ -959,7 +1050,7 @@ gui.ResetOnSpawn = false
 gui.DisplayOrder = 998
 mount(gui)
 
-local WIN_W, WIN_H, HEAD_H, FOOT_H, SIDE_W = 580, 420, 40, 26, 124
+local WIN_W, WIN_H, HEAD_H, FOOT_H, SIDE_W = 600, 440, 40, 26, 130
 
 local win = newInst("Frame", {
     Name = "Win", Size = UDim2.new(0, WIN_W, 0, WIN_H), Position = UDim2.new(0, 30, 0.5, -WIN_H / 2),
@@ -971,8 +1062,8 @@ stroke(win, T.stroke, 1)
 local header = newInst("Frame", { Size = UDim2.new(1, 0, 0, HEAD_H), BackgroundColor3 = T.side, BorderSizePixel = 0 }, win)
 local accentBar = newInst("Frame", { Size = UDim2.new(0, 3, 0, 18), Position = UDim2.new(0, 12, 0.5, -9), BackgroundColor3 = T.accent, BorderSizePixel = 0 }, header)
 corner(accentBar, 2)
-txt(header, { Size = UDim2.new(0, 220, 0, 18), Position = UDim2.new(0, 24, 0, 5), Text = "VIOLENCE DISTRICT", Font = Enum.Font.GothamBold, TextSize = 13 })
-txt(header, { Size = UDim2.new(0, 260, 0, 14), Position = UDim2.new(0, 24, 0, 22), Text = "Hub v3  -  RightShift = sembunyi", TextSize = 10, TextColor3 = T.sub })
+txt(header, { Size = UDim2.new(0, 240, 0, 18), Position = UDim2.new(0, 24, 0, 5), Text = "VIOLENCE DISTRICT", Font = Enum.Font.GothamBold, TextSize = 13 })
+txt(header, { Size = UDim2.new(0, 280, 0, 14), Position = UDim2.new(0, 24, 0, 22), Text = "Hub v3.1  -  RightShift = sembunyi", TextSize = 10, TextColor3 = T.sub })
 
 local bodyFrame = newInst("Frame", {
     Position = UDim2.new(0, 0, 0, HEAD_H), Size = UDim2.new(1, 0, 1, -HEAD_H), BackgroundTransparency = 1,
@@ -1005,6 +1096,7 @@ local function destroyHub()
     pcall(clearObjESP)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)
+    pcall(function() crossGui:Destroy() end)
     pcall(function() espFolder:Destroy() end)
     if genv.MAG_VD == hub then genv.MAG_VD = nil end
 end
@@ -1042,7 +1134,6 @@ do
     end))
 end
 
--- sidebar, konten, footer
 local sidebar = newInst("Frame", {
     Size = UDim2.new(0, SIDE_W, 1, -FOOT_H), BackgroundColor3 = T.side, BorderSizePixel = 0,
 }, bodyFrame)
@@ -1060,8 +1151,11 @@ local footLbl = txt(footer, {
     Size = UDim2.new(1, -16, 1, 0), Position = UDim2.new(0, 10, 0, 0), RichText = true, TextSize = 11, TextColor3 = T.sub, Text = "",
 })
 
-local TAB_NAMES  = { "ESP", "Skill", "Move", "Visual", "Aim", "Config" }
-local TAB_LABELS = { ESP = "ESP", Skill = "Auto Skill Check", Move = "Speed", Visual = "Visual", Aim = "Auto Aim", Config = "Config" }
+local TAB_NAMES  = { "ESP", "Crosshair", "Skill", "Move", "Visual", "Aim", "Config" }
+local TAB_LABELS = {
+    ESP = "ESP", Crosshair = "Crosshair", Skill = "Auto Skill Check",
+    Move = "Speed", Visual = "Visual", Aim = "Auto Aim", Config = "Config"
+}
 local pages, tabBtns = {}, {}
 
 local function selectTab(name)
@@ -1076,7 +1170,7 @@ end
 
 for i, name in ipairs(TAB_NAMES) do
     local b = newInst("TextButton", {
-        Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = T.side, AutoButtonColor = false, Text = "",
+        Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.side, AutoButtonColor = false, Text = "",
         BorderSizePixel = 0, LayoutOrder = i,
     }, sidebar)
     corner(b, 6)
@@ -1096,7 +1190,7 @@ for i, name in ipairs(TAB_NAMES) do
     pages[name] = pg
 end
 
--- komponen
+-- komponen UI
 local function mkCard(page, title)
     local card = newInst("Frame", {
         Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = T.card, BorderSizePixel = 0,
@@ -1270,12 +1364,12 @@ end
 local function mkLegend(card, items)
     local row = newInst("Frame", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1 }, card)
     newInst("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 12), VerticalAlignment = Enum.VerticalAlignment.Center,
+        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 10), VerticalAlignment = Enum.VerticalAlignment.Center,
     }, row)
     for _, it in ipairs(items) do
         local chip = newInst("Frame", { Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1 }, row)
         newInst("UIListLayout", {
-            FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 5), VerticalAlignment = Enum.VerticalAlignment.Center,
+            FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), VerticalAlignment = Enum.VerticalAlignment.Center,
         }, chip)
         local dot = newInst("Frame", { Size = UDim2.new(0, 10, 0, 10), BackgroundColor3 = it.color, BorderSizePixel = 0 }, chip)
         corner(dot, 5)
@@ -1320,36 +1414,57 @@ local function fmtDist(v) return (v <= 0) and "semua" or (string.format("%.0f", 
 local pE = pages["ESP"]
 local cTarget = mkCard(pE, "Target ESP")
 local espToggles = {}
-espToggles[#espToggles + 1] = { key = "killer", t = mkToggle(cTarget, "Killer", S.esp.killer, function(v) S.esp.killer = v end) }
-espToggles[#espToggles + 1] = { key = "survivor", t = mkToggle(cTarget, "Survivor", S.esp.survivor, function(v) S.esp.survivor = v end) }
-espToggles[#espToggles + 1] = { key = "gens", t = mkToggle(cTarget, "Generator + progress", S.esp.gens, function(v) S.esp.gens = v end) }
-espToggles[#espToggles + 1] = { key = "pallets", t = mkToggle(cTarget, "Pallet", S.esp.pallets, function(v) S.esp.pallets = v end) }
+espToggles[#espToggles + 1] = { key = "killer",   t = mkToggle(cTarget, "1. Killer (Merah + Highlight)", S.esp.killer, function(v) S.esp.killer = v; markDirty() end) }
+espToggles[#espToggles + 1] = { key = "survivor", t = mkToggle(cTarget, "2. Survivor (Hijau + Highlight)", S.esp.survivor, function(v) S.esp.survivor = v; markDirty() end) }
+espToggles[#espToggles + 1] = { key = "pallets",  t = mkToggle(cTarget, "3. Pallet (Ungu + Highlight)", S.esp.pallets, function(v) S.esp.pallets = v; markDirty() end) }
+espToggles[#espToggles + 1] = { key = "gens",     t = mkToggle(cTarget, "4. Generator (Kuning + Highlight + Progress)", S.esp.gens, function(v) S.esp.gens = v; markDirty() end) }
+espToggles[#espToggles + 1] = { key = "pumpkins", t = mkToggle(cTarget, "5. Labu / Pumpkin (Cyan + Highlight)", S.esp.pumpkins, function(v) S.esp.pumpkins = v; markDirty() end) }
+
 do
-    local allOn = false
-    mkButton(cTarget, "Nyalakan / matikan semua", function()
+    local allOn = true
+    mkButton(cTarget, "Nyalakan / matikan semua ESP", function()
         allOn = not allOn
         for _, it in ipairs(espToggles) do
             S.esp[it.key] = allOn
             it.t.set(allOn)
         end
+        markDirty()
     end, true)
 end
 mkLegend(cTarget, {
-    { color = COL.killer, text = "Killer" }, { color = COL.survivor, text = "Survivor" },
-    { color = COL.gen, text = "Generator" }, { color = COL.pallet, text = "Pallet" },
+    { color = COL.killer,   text = "Killer" },
+    { color = COL.survivor, text = "Survivor" },
+    { color = COL.pallet,   text = "Pallet" },
+    { color = COL.gen,      text = "Generator" },
+    { color = COL.pumpkin,  text = "Labu" },
 })
 
-local cShow = mkCard(pE, "Tampilan")
-mkToggle(cShow, "Sembunyikan generator selesai", S.esp.hideDone, function(v) S.esp.hideDone = v; markDirty() end)
-mkToggle(cShow, "Isi warna highlight (default garis tepi)", S.esp.fill, function(v) S.esp.fill = v; markDirty() end)
-mkSlider(cShow, "Jarak maks pemain & generator", 0, 400, S.esp.maxDist, 10, fmtDist, function(v) S.esp.maxDist = v; markDirty() end)
-mkSlider(cShow, "Jarak maks pallet", 0, 300, S.esp.palletDist, 10, fmtDist, function(v) S.esp.palletDist = v; markDirty() end)
-mkNote(cShow, "Label: nama + jarak. DOWN = rubuh, H1/H2 = sudah di-hook sekian kali. Generator tampil GEN xx%.", 40)
+local cShow = mkCard(pE, "Tampilan ESP")
+mkToggle(cShow, "Sembunyikan generator selesai (100%)", S.esp.hideDone, function(v) S.esp.hideDone = v; markDirty() end)
+mkToggle(cShow, "Isi warna Highlight (Fill Color)", S.esp.fill, function(v) S.esp.fill = v; markDirty() end)
+mkSlider(cShow, "Jarak maks Pemain, Gen & Labu", 0, 500, S.esp.maxDist, 10, fmtDist, function(v) S.esp.maxDist = v; markDirty() end)
+mkSlider(cShow, "Jarak maks Pallet", 0, 400, S.esp.palletDist, 10, fmtDist, function(v) S.esp.palletDist = v; markDirty() end)
+
+-- ===== CROSSHAIR =====
+local pCr = pages["Crosshair"]
+local cCr = mkCard(pCr, "Pengaturan Crosshair")
+mkToggle(cCr, "Tampilkan Crosshair", S.cross.on, function(v) S.cross.on = v; updateCrosshair(); markDirty() end)
+mkToggle(cCr, "Titik tengah (Center Dot)", S.cross.dot, function(v) S.cross.dot = v; updateCrosshair(); markDirty() end)
+mkSegment(cCr, "Warna Crosshair", {
+    { label = "Hijau", value = "Green" },
+    { label = "Cyan",  value = "Cyan" },
+    { label = "Merah", value = "Red" },
+    { label = "Kuning", value = "Yellow" },
+    { label = "Putih", value = "White" },
+}, S.cross.color, function(v) S.cross.color = v; updateCrosshair(); markDirty() end)
+mkSlider(cCr, "Panjang garis (Size)", 2, 25, S.cross.size, 1, fmtInt, function(v) S.cross.size = v; updateCrosshair(); markDirty() end)
+mkSlider(cCr, "Celah tengah (Gap)", 0, 20, S.cross.gap, 1, fmtInt, function(v) S.cross.gap = v; updateCrosshair(); markDirty() end)
+mkSlider(cCr, "Ketebalan (Thickness)", 1, 6, S.cross.thick, 1, fmtInt, function(v) S.cross.thick = v; updateCrosshair(); markDirty() end)
 
 -- ===== SKILL =====
 local pS = pages["Skill"]
 local cSk = mkCard(pS, "Auto skill check")
-local skOnT = mkToggle(cSk, "Auto skill check", SKC.on, function(v) SKC.on = v; markDirty() end)
+mkToggle(cSk, "Auto skill check", SKC.on, function(v) SKC.on = v; markDirty() end)
 mkToggle(cSk, "Belajar tombol & offset dari klik manual", SKC.learn, function(v) SKC.learn = v; markDirty() end)
 local inputSeg = mkSegment(cSk, "Tombol yang ditekan", {
     { label = "Space", value = "Space" }, { label = "Klik", value = "Mouse" },
@@ -1379,7 +1494,6 @@ local skStatus = txt(cStat, {
     Size = UDim2.new(1, 0, 0, 74), RichText = true, TextWrapped = true, Font = Enum.Font.Code, TextSize = 11,
     TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = T.text, Text = "...",
 })
-mkNote(cStat, "Cara kerja: saat skill check muncul, jarum (Line) ditekan ketika mencapai Goal + offset. Klik sendiri di tengah zona beberapa kali dan script akan menyesuaikan offset dan tombolnya.", 52)
 
 -- ===== MOVE =====
 local pMv = pages["Move"]
@@ -1391,7 +1505,6 @@ mkSegment(cMv, "Mode", { { label = "WalkSpeed", value = "WalkSpeed" }, { label =
 end)
 mkSlider(cMv, "WalkSpeed (mode WalkSpeed)", 8, 120, S.move.ws, 1, fmtInt, function(v) S.move.ws = v; markDirty() end)
 mkSlider(cMv, "Tambahan studs/dtk (mode CFrame)", 0, 60, S.move.cf, 1, fmtInt, function(v) S.move.cf = v; markDirty() end)
-mkNote(cMv, "WalkSpeed bisa dikembalikan server kapan saja. Mode CFrame menambah gerakan di atas speed asli, lebih tahan reset tapi bisa terlihat rubberband. Mulai dari nilai kecil.", 52)
 
 -- ===== VISUAL =====
 local pV = pages["Visual"]
@@ -1406,7 +1519,6 @@ mkToggle(cVis, "Hilangkan layar gelap (Darkness GUI)", S.vis.noDark, function(v)
     if not v then darkRestore() end
     markDirty()
 end)
-mkNote(cVis, "Mematikan kabut, atmosphere, blur, color correction, bayangan global, dan mengunci jam ke siang. Semua dikembalikan saat dimatikan.", 40)
 
 -- ===== AIM =====
 local pA = pages["Aim"]
@@ -1419,25 +1531,22 @@ mkSlider(cAim, "Radius FOV", 50, 800, S.aim.fov, 10, function(v) return string.f
 mkSlider(cAim, "Jarak maks", 20, 500, S.aim.dist, 10, function(v) return string.format("%.0f st", v) end, function(v) S.aim.dist = v; markDirty() end)
 mkSlider(cAim, "Kehalusan (1 = snap)", 0.05, 1, S.aim.smooth, 0.05, function(v) return string.format("%.2f", v) end, function(v) S.aim.smooth = v; markDirty() end)
 mkToggle(cAim, "Abaikan target di balik tembok", S.aim.wall, function(v) S.aim.wall = v; markDirty() end)
-mkNote(cAim, "Killer membidik survivor, survivor membidik killer. Di luar match membidik pemain mana pun. Kamera diputar ke target selama klik kanan ditahan.", 40)
 
 -- ===== CONFIG =====
 local pC = pages["Config"]
 local cCfg = mkCard(pC, "Pengaturan")
 mkButton(cCfg, "Simpan config sekarang", function()
-    notify(cfgSave() and "Config disimpan" or "Gagal menyimpan (writefile tidak ada?)", T.on)
+    notify(cfgSave() and "Config disimpan" or "Gagal menyimpan", T.on)
 end, true)
-mkNote(cCfg, "Pengaturan (offset, tombol, slider, mode) tersimpan otomatis ke VD_Hub_Config.json di folder workspace executor dan dimuat saat script dijalankan lagi.", 52)
 local cDbg = mkCard(pC, "Debug")
-mkButton(cDbg, "Dump generator, pallet & peta -> VD_Debug.txt", function()
+mkButton(cDbg, "Dump generator, pallet & labu -> VD_Debug.txt", function()
     task.spawn(function()
         notify(dumpDebug() and "Dump ditulis ke VD_Debug.txt" or "Gagal menulis file", T.warn)
     end)
 end)
-mkNote(cDbg, "Berguna kalau deteksi generator atau pallet berubah setelah update game.", 28)
 
 ------------------------------------------------------------------
--- LOOP UI
+-- LOOP UI & ESP
 ------------------------------------------------------------------
 task.spawn(function()
     while alive do
@@ -1445,37 +1554,26 @@ task.spawn(function()
         pcall(updatePlayersESP)
         pcall(updateObjESP)
 
-        -- sinkronkan nilai yang bisa berubah karena belajar otomatis
         offsetSlider.set(SKC.offset)
         leadSlider.set(SKC.lead)
         inputSeg.set(SKC.input)
 
-        -- status skill check
         local l1 = string.format("Tombol: %s   Offset: %.1f (%d sampel)", SKC.input, SKC.offset, #st.samples)
         local l2 = string.format("Speed jarum: %.0f/dtk   Auto klik: %d", st.speed, st.presses)
         local l3
         if st.active then
             l3 = string.format('<font color="#46C878">AKTIF</font>  goal=%.0f line=%.0f target=%.0f', st.goal, st.line, st.goal + SKC.offset)
-            if st.pressed and (os.clock() - st.autoT) > 0.6 then
-                l3 = l3 .. '\n<font color="#EB4155">klik tidak diterima, coba ganti tombol</font>'
-            end
         else
             l3 = '<font color="#969BAF">menunggu skill check...</font>'
             if st.note ~= "" then l3 = l3 .. "\n" .. st.note end
         end
         skStatus.Text = l1 .. "\n" .. l2 .. "\n" .. l3
 
-        -- footer
-        local skTxt
-        if not SKC.on then
-            skTxt = '<font color="#969BAF">skill: off</font>'
-        elseif st.active then
-            skTxt = '<font color="#46C878">skill: aktif</font>'
-        else
-            skTxt = "skill: siap"
-        end
-        footLbl.Text = string.format("Role: %s    Generator: %d    Pallet: %d    %s%s",
-            tostring(roleOf(LP) or "-"), countObjs("gen"), countObjs("pallet"), skTxt, scanDone and "" or "    (scan awal...)")
+        footLbl.Text = string.format(
+            "Role: %s   |   Gen: %d   |   Pallet: %d   |   Labu: %d%s",
+            tostring(roleOf(LP) or "-"), countObjs("gen"), countObjs("pallet"), countObjs("pumpkin"),
+            scanDone and "" or "   (scanning...)"
+        )
     end
 end)
 
@@ -1496,4 +1594,4 @@ end))
 
 genv.MAG_VD = hub
 selectTab("ESP")
-print("[VD Hub v3] siap. RightShift = sembunyi/tampilkan window.")
+print("[VD Hub v3.1] Siap. RightShift = sembunyikan/tampilkan window.")
