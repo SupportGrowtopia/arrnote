@@ -1,12 +1,13 @@
 --[[
 =====================================================================
-  ViolenceDistrict_Fluent.lua (v3.5 - Anti-Lag & Optimized Edition)
+  ViolenceDistrict_Fluent.lua (v3.6 - Anti-Lag & No-Distance ESP)
   Perbaikan Performa:
-  - Zero-Allocation RenderStepped (Skill Check & Fullbright di-cache)
-  - Pembatasan Highlight otomatis (mencegah limit 31 Highlight Roblox)
-  - Event Throttling untuk StreamingEnabled & ClientChainVisual
-  - Auto Skill Check murni (Fitur Auto-Learn dihapus)
-  - Low Mode instan tanpa bikin stutter/freeze
+  - Hilangkan jarak di ESP (mencegah TextLabel layout & string format terus menerus)
+  - ESP Instance Pooling (toggle Enabled = false daripada Destroy/Instance.new)
+  - Pembatasan Highlight maksimal 24 (mencegah limit 31 Highlight Roblox & drop FPS)
+  - RaycastParams reusable untuk Auto Aim (Zero-Allocation RenderStep)
+  - Fullbright guarded check (hanya reapply jika lighting diubah game)
+  - Telemetry UI throttling 1.5 detik
 =====================================================================
 ]]
 
@@ -318,6 +319,9 @@ local function updatePlayersESP()
                         e.hl = makeHighlight(char, col)
                         e.bb, e.lbl = makeLabel(hrp, col, 11, 3.2)
                         pEsp[plr] = e
+                    else
+                        if not e.hl.Enabled then e.hl.Enabled = true end
+                        if not e.bb.Enabled then e.bb.Enabled = true end
                     end
                     -- Hanya update property jika berubah (mencegah GPU redraw)
                     if e.col ~= col then
@@ -336,7 +340,7 @@ local function updatePlayersESP()
                     local hc = tonumber(char:GetAttribute("HookCount")) or 0
                     if hc > 0 then tags = tags .. " [H" .. string.format("%.0f", hc) .. "]" end
                     local prefix = (role == "Killer") and "[KILLER] " or ""
-                    local newTxt = string.format("%s%s (%.0fm)%s", prefix, plr.Name:sub(1, 14), dist, tags)
+                    local newTxt = prefix .. plr.Name:sub(1, 14) .. tags
                     if e.txt ~= newTxt then
                         e.txt = newTxt
                         e.lbl.Text = newTxt
@@ -347,8 +351,13 @@ local function updatePlayersESP()
     end
     for plr, e in pairs(pEsp) do
         if not seen[plr] then
-            destroyEntry(e)
-            pEsp[plr] = nil
+            if plr.Parent == nil or not plr.Character then
+                destroyEntry(e)
+                pEsp[plr] = nil
+            else
+                if e.hl and e.hl.Enabled then e.hl.Enabled = false end
+                if e.bb and e.bb.Enabled then e.bb.Enabled = false end
+            end
         end
     end
 end
@@ -413,17 +422,29 @@ local function updateObjESP()
     end
 
     local root = getRoot()
+    local rootPos = root and root.Position
     local seen = {}
     local targetFill = S.esp.fill and 0.65 or 1
+    local activeHighlights = 0
+
+    for _, pe in pairs(pEsp) do
+        if pe.hl and pe.hl.Enabled then
+            activeHighlights = activeHighlights + 1
+        end
+    end
 
     for kind in pairs(want) do
         local col = COL[kind]
         for inst, data in pairs(OBJ[kind]) do
             if inst.Parent then
-                -- Untuk pallet, cek apakah model Intact masih ada (belum hancur)
                 local valid = true
                 if kind == "pallet" and inst:IsA("Model") and not inst:FindFirstChild("Intact") then
                     valid = false
+                    OBJ[kind][inst] = nil
+                    if objEsp[inst] then
+                        destroyEntry(objEsp[inst])
+                        objEsp[inst] = nil
+                    end
                 end
 
                 if valid then
@@ -434,7 +455,7 @@ local function updateObjESP()
                     end
                     local pos = posOf(ad or inst)
                     if ad and pos then
-                        local dist = root and (root.Position - pos).Magnitude or 0
+                        local dist = rootPos and (rootPos - pos).Magnitude or 0
                         local limit = (kind == "pallet") and S.esp.palletDist or S.esp.maxDist
                         local show = (limit <= 0) or (dist <= limit)
                         local text = nil
@@ -444,12 +465,12 @@ local function updateObjESP()
                             if pct >= 99.9 and S.esp.hideDone then
                                 show = false
                             else
-                                text = string.format("GEN %.0f%% (%.0fm)", pct, dist)
+                                text = string.format("GEN %.0f%%", pct)
                             end
                         elseif show and kind == "pallet" then
-                            text = string.format("PALLET (%.0fm)", dist)
+                            text = "PALLET"
                         elseif show and kind == "pumpkin" then
-                            text = string.format("LABU (%.0fm)", dist)
+                            text = "LABU"
                         end
 
                         if show then
@@ -463,6 +484,18 @@ local function updateObjESP()
                                 e.bb, e.lbl = makeLabel(ad, col, (kind == "gen") and 12 or 10, (kind == "gen") and 3 or 2)
                                 objEsp[inst] = e
                             end
+
+                            -- Batasi highlight maks 24 agar tidak pernah tembus limit 31 Roblox
+                            local allowHl = (kind == "gen") or (activeHighlights < 24)
+                            if allowHl then
+                                activeHighlights = activeHighlights + 1
+                                if not e.hl.Enabled then e.hl.Enabled = true end
+                            else
+                                if e.hl.Enabled then e.hl.Enabled = false end
+                            end
+
+                            if not e.bb.Enabled then e.bb.Enabled = true end
+
                             if e.fill ~= targetFill then
                                 e.fill = targetFill
                                 e.hl.FillTransparency = targetFill
@@ -476,14 +509,23 @@ local function updateObjESP()
                 end
             else
                 OBJ[kind][inst] = nil
+                if objEsp[inst] then
+                    destroyEntry(objEsp[inst])
+                    objEsp[inst] = nil
+                end
             end
         end
     end
 
     for inst, e in pairs(objEsp) do
         if not seen[inst] then
-            destroyEntry(e)
-            objEsp[inst] = nil
+            if inst.Parent == nil then
+                destroyEntry(e)
+                objEsp[inst] = nil
+            else
+                if e.hl and e.hl.Enabled then e.hl.Enabled = false end
+                if e.bb and e.bb.Enabled then e.bb.Enabled = false end
+            end
         end
     end
 end
@@ -824,13 +866,17 @@ track(RunService.Heartbeat:Connect(function(dt)
     end
 end))
 
+local aimRayParams = RaycastParams.new()
+pcall(function()
+    aimRayParams.FilterType = Enum.RaycastFilterType.Exclude
+end)
+
 local function pickTarget()
     local cam = workspace.CurrentCamera
     if not cam then return nil end
     local myRole = roleOf(LP)
     local camPos = cam.CFrame.Position
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    local okf, ft = pcall(function() return Enum.RaycastFilterType.Exclude end)
     local best, bestScore = nil, math.huge
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LP then
@@ -856,10 +902,8 @@ local function pickTarget()
                             if d2 <= S.aim.fov and d3 <= S.aim.dist and d2 < bestScore then
                                 local visible = true
                                 if S.aim.wall then
-                                    local rp = RaycastParams.new()
-                                    rp.FilterType = okf and ft or Enum.RaycastFilterType.Blacklist
-                                    rp.FilterDescendantsInstances = { LP.Character, char }
-                                    visible = workspace:Raycast(camPos, part.Position - camPos, rp) == nil
+                                    aimRayParams.FilterDescendantsInstances = { LP.Character, char }
+                                    visible = workspace:Raycast(camPos, part.Position - camPos, aimRayParams) == nil
                                 end
                                 if visible then
                                     best, bestScore = part, d2
@@ -1216,37 +1260,46 @@ Tabs.Settings:AddButton({
 task.spawn(function()
     local lastInfoStr = ""
     local lastSkStr = ""
+    local lastTelemetry = 0
     while alive do
         task.wait(0.3)
         pcall(updatePlayersESP)
         pcall(updateObjESP)
-        if S.vis.full then pcall(lightApply) end
 
-        pcall(function()
-            local infoStr = string.format(
-                "Role Kamu: %s  |  Gen: %d  |  Pallet: %d  |  Labu: %d",
-                tostring(roleOf(LP) or "Lobby"),
-                countObjs("gen"),
-                countObjs("pallet"),
-                countObjs("pumpkin")
-            )
-            if infoStr ~= lastInfoStr then
-                lastInfoStr = infoStr
-                EspInfoParagraph:SetDesc(infoStr)
-            end
+        -- Hanya panggil lightApply jika lighting di-reset oleh game
+        if S.vis.full and (Lighting.Brightness ~= S.vis.bright or Lighting.ClockTime ~= 14 or Lighting.FogEnd < 1e5) then
+            pcall(lightApply)
+        end
 
-            local stateStr = st.active
-                and string.format("AKTIF (Goal: %.0f | Line: %.0f | Target: %.0f)", st.goal, st.line, st.goal + SKC.offset)
-                or st.note
-            local skStr = string.format(
-                "Tombol: %s  |  Offset: %.1f  |  Speed Jarum: %.0f/dtk  |  Auto Klik: %d\n%s",
-                SKC.input, SKC.offset, st.speed, st.presses, stateStr
-            )
-            if skStr ~= lastSkStr then
-                lastSkStr = skStr
-                SkStatusParagraph:SetDesc(skStr)
-            end
-        end)
+        local now = os.clock()
+        if now - lastTelemetry >= 1.5 then
+            lastTelemetry = now
+            pcall(function()
+                local infoStr = string.format(
+                    "Role Kamu: %s  |  Gen: %d  |  Pallet: %d  |  Labu: %d",
+                    tostring(roleOf(LP) or "Lobby"),
+                    countObjs("gen"),
+                    countObjs("pallet"),
+                    countObjs("pumpkin")
+                )
+                if infoStr ~= lastInfoStr then
+                    lastInfoStr = infoStr
+                    EspInfoParagraph:SetDesc(infoStr)
+                end
+
+                local stateStr = st.active
+                    and string.format("AKTIF (Goal: %.0f | Line: %.0f | Target: %.0f)", st.goal, st.line, st.goal + SKC.offset)
+                    or st.note
+                local skStr = string.format(
+                    "Tombol: %s  |  Offset: %.1f  |  Speed Jarum: %.0f/dtk  |  Auto Klik: %d\n%s",
+                    SKC.input, SKC.offset, st.speed, st.presses, stateStr
+                )
+                if skStr ~= lastSkStr then
+                    lastSkStr = skStr
+                    SkStatusParagraph:SetDesc(skStr)
+                end
+            end)
+        end
     end
 end)
 
@@ -1255,6 +1308,6 @@ SaveManager:LoadAutoloadConfig()
 
 Fluent:Notify({
     Title = "Violence District",
-    Content = "Fluent Hub v3.5 (Anti-Lag) siap dijalankan!",
+    Content = "Fluent Hub v3.6 (Anti-Lag & No-Distance) siap!",
     Duration = 4
 })
