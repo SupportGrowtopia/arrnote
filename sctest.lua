@@ -80,7 +80,7 @@ local S = {
         colorScheme = "Original",
         disableBones = true
     },
-    aim  = { on = false, fov = 250, dist = 150, smooth = 0.5, part = "HumanoidRootPart", wall = true },
+    aim  = { on = false, mode = "Silent", trigger = "Always", fov = 250, dist = 150, smooth = 0.5, part = "HumanoidRootPart", wall = true },
 }
 
 -- Auto Skill Check (Tanpa Auto-Learn)
@@ -876,7 +876,8 @@ local function pickTarget()
     if not cam then return nil end
     local myRole = roleOf(LP)
     local camPos = cam.CFrame.Position
-    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local mouseLoc = UIS:GetMouseLocation()
+    local center = mouseLoc or Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     local best, bestScore = nil, math.huge
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LP then
@@ -918,17 +919,111 @@ local function pickTarget()
     return best
 end
 
+local currentTargetPart = nil
+
+local function getValidTarget()
+    if not S.aim.on then return nil end
+    if S.aim.trigger == "RightClick" and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        return nil
+    end
+    if UIS:GetFocusedTextBox() then return nil end
+    return currentTargetPart
+end
+
+genv.VD_GET_TARGET = getValidTarget
+
+-- Update target berkala (Zero redundant calculation)
+track(RunService.Heartbeat:Connect(function()
+    if not S.aim.on then
+        currentTargetPart = nil
+        return
+    end
+    if S.aim.trigger == "RightClick" and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        currentTargetPart = nil
+        return
+    end
+    if UIS:GetFocusedTextBox() then
+        currentTargetPart = nil
+        return
+    end
+    local ok, target = pcall(pickTarget)
+    if ok and target then
+        currentTargetPart = target
+    else
+        currentTargetPart = nil
+    end
+end))
+
+-- Mode 1: Camera Lock (Hanya jika mode Camera & tahan klik kanan)
 RunService:BindToRenderStep("MAG_VD_Aim", Enum.RenderPriority.Camera.Value + 1, function()
-    if not S.aim.on then return end
+    if not S.aim.on or S.aim.mode ~= "Camera" then return end
     if not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
     if UIS:GetFocusedTextBox() then return end
     local cam = workspace.CurrentCamera
-    if not cam then return end
-    local ok, part = pcall(pickTarget)
-    if not ok or not part then return end
-    local goal = CFrame.lookAt(cam.CFrame.Position, part.Position)
+    if not cam or not currentTargetPart then return end
+    local goal = CFrame.lookAt(cam.CFrame.Position, currentTargetPart.Position)
     cam.CFrame = cam.CFrame:Lerp(goal, S.aim.smooth)
 end)
+
+-- Mode 2: SILENT AIM (Hook __index & __namecall via Xeno Metamethod)
+if not genv.VD_SILENT_HOOKED and type(hookmetamethod) == "function" then
+    genv.VD_SILENT_HOOKED = true
+
+    -- Hook Mouse.Hit & Mouse.Target
+    local oldIndex
+    oldIndex = hookmetamethod(game, "__index", function(self, key)
+        if not checkcaller() then
+            local getTgt = genv.VD_GET_TARGET
+            local target = getTgt and getTgt()
+            if target and S.aim.mode == "Silent" then
+                if typeof(self) == "Instance" and self:IsA("Mouse") then
+                    if key == "Hit" or key == "hit" then
+                        return CFrame.new(target.Position)
+                    elseif key == "Target" or key == "target" then
+                        return target
+                    end
+                end
+            end
+        end
+        return oldIndex(self, key)
+    end)
+
+    -- Hook Raycast & FindPartOnRay
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        if not checkcaller() then
+            local getTgt = genv.VD_GET_TARGET
+            local target = getTgt and getTgt()
+            if target and S.aim.mode == "Silent" and self == workspace then
+                if method == "Raycast" or method == "raycast" then
+                    local args = { ... }
+                    local origin = args[1]
+                    local direction = args[2]
+                    if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+                        local mag = direction.Magnitude
+                        if mag > 0 then
+                            args[2] = (target.Position - origin).Unit * mag
+                            return oldNamecall(self, table.unpack(args))
+                        end
+                    end
+                elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+                    local args = { ... }
+                    local r = args[1]
+                    if typeof(r) == "Ray" then
+                        local origin = r.Origin
+                        local direction = r.Direction
+                        local mag = direction.Magnitude
+                        local newDir = (target.Position - origin).Unit * mag
+                        args[1] = Ray.new(origin, newDir)
+                        return oldNamecall(self, table.unpack(args))
+                    end
+                end
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+end
 
 ------------------------------------------------------------------
 -- FLUENT WINDOW & TABS
@@ -1108,10 +1203,30 @@ MvSec:AddSlider("MV_CF", {
     Callback = function(v) S.move.cf = v end
 })
 
-local AimSec = Tabs.MoveAim:AddSection("Auto Aim (Tahan Klik Kanan)")
+local AimSec = Tabs.MoveAim:AddSection("Auto Aim & Silent Aim")
 
 local T_AimOn = AimSec:AddToggle("AIM_On", { Title = "Aktifkan Auto Aim", Default = false })
 T_AimOn:OnChanged(function() S.aim.on = Options.AIM_On.Value end)
+
+local D_AimMode = AimSec:AddDropdown("AIM_Mode", {
+    Title = "Mode Aim",
+    Values = { "Silent (Peluru Belok)", "Camera (Lock Kamera)" },
+    Multi = false,
+    Default = 1,
+})
+D_AimMode:OnChanged(function(v)
+    S.aim.mode = (v == "Camera (Lock Kamera)") and "Camera" or "Silent"
+end)
+
+local D_AimTrigger = AimSec:AddDropdown("AIM_Trigger", {
+    Title = "Aktivasi Aim",
+    Values = { "Selalu Aktif (Dalam FOV)", "Tahan Klik Kanan" },
+    Multi = false,
+    Default = 1,
+})
+D_AimTrigger:OnChanged(function(v)
+    S.aim.trigger = (v == "Tahan Klik Kanan") and "RightClick" or "Always"
+end)
 
 local D_AimPart = AimSec:AddDropdown("AIM_Part", {
     Title = "Bagian Target",
@@ -1137,7 +1252,7 @@ AimSec:AddSlider("AIM_Dist", {
 })
 
 AimSec:AddSlider("AIM_Smooth", {
-    Title = "Smoothness (1 = Snap Instan)",
+    Title = "Smoothness Kamera (Mode Camera Saja)",
     Default = 0.5, Min = 0.05, Max = 1, Rounding = 2,
     Callback = function(v) S.aim.smooth = v end
 })
@@ -1236,6 +1351,7 @@ local function destroyHub()
     S.move.on = false
     S.aim.on = false
     SKC.on = false
+    genv.VD_GET_TARGET = nil
     pcall(lightRestore)
     pcall(toggleSmartBoneWorkers, false)
     pcall(function() RunService:UnbindFromRenderStep("MAG_VD_Aim") end)
